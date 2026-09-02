@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>محاسبة المحل</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');
+  body { font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif; background:#F6F7F9; margin:0; }
+  * { box-sizing: border-box; }
+  .num { font-variant-numeric: tabular-nums; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #d7dbe1; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+const STORAGE_KEY = "shop-finance-data-v1";
+const AR_MONTHS = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+
+const DEFAULT_DATA = {
+  settings: { shopName: "محل الصيانة", currency: "ريال", initialBalance: 0, cashAmount: 0, networkAmount: 0 },
+  categories: {
+    income: ["صيانة", "بيع قطعة", "بيع جهاز", "أخرى"],
+    expense: ["إيجار", "قطع غيار", "رواتب", "كهرباء", "مشتريات", "أدوات", "تسويق", "شراء أجهزة", "تسديد مناديب", "أخرى"],
+  },
+  partners: [],
+  transactions: [],
+  obligations: [],
+  devices: [],
+  suppliers: [], // {id,name,phone,notes,entries:[{id,type:'debt'|'payment',amount,date,notes,linkedTxId,createdAt}],createdAt}
+  closings: [], // {id,date,openingBalance,income,expense,withdraw,net,closingBalance,notes,closedAt}
+};
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function fmt(n) { return Number(n || 0).toLocaleString("ar-SA", { maximumFractionDigits: 2 }); }
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function monthKey(d) { return d.slice(0, 7); }
+function csvEscape(s) { const str = String(s ?? ""); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; }
+function downloadFile(filename, content, mime = "text/csv;charset=utf-8;") {
+  const blob = new Blob(["\uFEFF" + content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function buildClosingText(shopName, date, opening, closing, income, expense, withdraw, net, dayTx, currency) {
+  const lines = [];
+  lines.push(`📋 تقفيلة يوم ${date} — ${shopName}`);
+  lines.push("");
+  lines.push(`رصيد بداية اليوم: ${fmt(opening)} ${currency}`);
+  lines.push(`رصيد نهاية اليوم: ${fmt(closing)} ${currency}`);
+  lines.push("");
+  lines.push(`📈 الإيرادات: ${fmt(income)} ${currency}`);
+  lines.push(`📉 المصروفات: ${fmt(expense)} ${currency}`);
+  lines.push(`↗ السحوبات: ${fmt(withdraw)} ${currency}`);
+  lines.push(`🏦 صافي الربح: ${fmt(net)} ${currency}`);
+  lines.push("");
+  lines.push(`عدد العمليات: ${dayTx.length}`);
+  if (dayTx.length) {
+    lines.push("");
+    lines.push("تفاصيل العمليات:");
+    dayTx.forEach((t, i) => {
+      const name = t.type === "withdraw" ? t.person : t.title;
+      const sign = t.type === "income" ? "+" : "-";
+      lines.push(`${i + 1}. ${TYPE_META[t.type].label} — ${name} — ${sign}${fmt(t.amount)} ${currency}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+function printClosing(shopName, date, opening, closing, income, expense, withdraw, net, dayTx, currency) {
+  const rows = dayTx.map((t, i) => {
+    const name = t.type === "withdraw" ? t.person : t.title;
+    const sign = t.type === "income" ? "+" : "-";
+    return `<tr><td>${i + 1}</td><td>${TYPE_META[t.type].label}</td><td>${name}</td><td>${t.category || ""}</td><td>${sign}${fmt(t.amount)}</td></tr>`;
+  }).join("");
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>تقفيلة ${date}</title>
+  <style>
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#1e293b;}
+    h1{font-size:20px; margin-bottom:4px;}
+    .sub{color:#64748b; font-size:13px; margin-bottom:20px;}
+    .grid{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px;}
+    .card{border:1px solid #e2e8f0; border-radius:12px; padding:12px 16px; min-width:140px;}
+    .card .label{font-size:11px; color:#94a3b8; margin-bottom:4px;}
+    .card .value{font-size:16px; font-weight:bold;}
+    table{width:100%; border-collapse:collapse; margin-top:10px;}
+    th,td{border:1px solid #e2e8f0; padding:8px; text-align:right; font-size:13px;}
+    th{background:#f8fafc;}
+    @media print { button{display:none;} }
+  </style></head>
+  <body>
+    <h1>تقفيلة يوم ${date}</h1>
+    <div class="sub">${shopName}</div>
+    <div class="grid">
+      <div class="card"><div class="label">رصيد بداية اليوم</div><div class="value">${fmt(opening)} ${currency}</div></div>
+      <div class="card"><div class="label">رصيد نهاية اليوم</div><div class="value">${fmt(closing)} ${currency}</div></div>
+      <div class="card"><div class="label">الإيرادات</div><div class="value" style="color:#0f9d6e">${fmt(income)} ${currency}</div></div>
+      <div class="card"><div class="label">المصروفات</div><div class="value" style="color:#d64545">${fmt(expense)} ${currency}</div></div>
+      <div class="card"><div class="label">السحوبات</div><div class="value" style="color:#b8860b">${fmt(withdraw)} ${currency}</div></div>
+      <div class="card"><div class="label">صافي الربح</div><div class="value" style="color:#3B82F6">${fmt(net)} ${currency}</div></div>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>النوع</th><th>الاسم</th><th>التصنيف</th><th>المبلغ</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">لا توجد عمليات</td></tr>'}</tbody>
+    </table>
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+}
+
+const TYPE_META = {
+  income: { label: "إيراد", color: "#0f9d6e", bg: "#e7f7f1", icon: "↑" },
+  expense: { label: "مصروف", color: "#d64545", bg: "#fdecec", icon: "↓" },
+  withdraw: { label: "سحب", color: "#b8860b", bg: "#fbf2df", icon: "↗" },
+};
+
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_DATA;
+    const parsed = JSON.parse(raw);
+    const settings = { ...DEFAULT_DATA.settings, ...parsed.settings };
+    if (parsed.settings && (parsed.settings.initialCashBalance !== undefined || parsed.settings.initialNetworkBalance !== undefined) && parsed.settings.initialBalance === undefined) {
+      settings.initialBalance = Number(parsed.settings.initialCashBalance || 0) + Number(parsed.settings.initialNetworkBalance || 0);
+    }
+    return {
+      ...DEFAULT_DATA, ...parsed,
+      settings,
+      categories: { ...DEFAULT_DATA.categories, ...parsed.categories },
+      obligations: parsed.obligations || [],
+      partners: parsed.partners || [],
+      transactions: parsed.transactions || [],
+      devices: parsed.devices || [],
+      suppliers: parsed.suppliers || [],
+      closings: parsed.closings || [],
+    };
+  } catch (e) { return DEFAULT_DATA; }
+}
+
+function App() {
+  const [data, setData] = useState(loadData);
+  const [tab, setTab] = useState("dashboard");
+  const [addOpen, setAddOpen] = useState(false);
+  const [addType, setAddType] = useState("income");
+  const [editItem, setEditItem] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const persist = useCallback((next) => {
+    setData(next);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); }
+    catch (e) { showToast("تعذر حفظ البيانات على هذا الجهاز", "error"); }
+  }, []);
+
+  function showToast(msg, kind = "ok") {
+    setToast({ msg, kind });
+    setTimeout(() => setToast(null), 2200);
+  }
+
+  const totals = useMemo(() => {
+    let income = 0, expense = 0, withdraw = 0;
+    for (const t of data.transactions) {
+      if (t.type === "income") income += t.amount;
+      else if (t.type === "expense") expense += t.amount;
+      else if (t.type === "withdraw") withdraw += t.amount;
+    }
+    const netProfit = income - expense;
+    const balance = Number(data.settings.initialBalance || 0) + income - expense - withdraw;
+    return { income, expense, withdraw, netProfit, balance };
+  }, [data]);
+
+  const now = new Date();
+  const curMonth = now.toISOString().slice(0, 7);
+  const curYear = String(now.getFullYear());
+
+  const monthTotals = useCallback((mKey) => {
+    let income = 0, expense = 0, withdraw = 0;
+    for (const t of data.transactions) {
+      if (monthKey(t.date) !== mKey) continue;
+      if (t.type === "income") income += t.amount;
+      else if (t.type === "expense") expense += t.amount;
+      else if (t.type === "withdraw") withdraw += t.amount;
+    }
+    return { income, expense, withdraw, net: income - expense };
+  }, [data]);
+
+  const yearTotals = useCallback((year) => {
+    let income = 0, expense = 0, withdraw = 0;
+    const byMonth = AR_MONTHS.map((name, idx) => {
+      const mKey = `${year}-${String(idx + 1).padStart(2, "0")}`;
+      const mt = monthTotals(mKey);
+      income += mt.income; expense += mt.expense; withdraw += mt.withdraw;
+      return { name, mKey, ...mt };
+    });
+    return { income, expense, withdraw, net: income - expense, byMonth };
+  }, [monthTotals]);
+
+  function upsertTransaction(payload) {
+    if (payload.id) {
+      persist({ ...data, transactions: data.transactions.map(t => t.id === payload.id ? { ...t, ...payload } : t) });
+      showToast("تم تحديث العملية");
+    } else {
+      const item = { ...payload, id: uid(), createdAt: new Date().toISOString() };
+      persist({ ...data, transactions: [item, ...data.transactions] });
+      showToast("تمت إضافة العملية");
+    }
+    setAddOpen(false); setEditItem(null);
+  }
+
+  function deleteTransaction(id) {
+    persist({ ...data, transactions: data.transactions.filter(t => t.id !== id) });
+    setConfirmDelete(null);
+    showToast("تم الحذف");
+  }
+
+  function updateSettings(patch) { persist({ ...data, settings: { ...data.settings, ...patch } }); }
+
+  function addCategory(type, name) {
+    name = name.trim();
+    if (!name) return;
+    if (data.categories[type].includes(name)) return showToast("التصنيف موجود مسبقًا", "error");
+    persist({ ...data, categories: { ...data.categories, [type]: [...data.categories[type], name] } });
+  }
+  function removeCategory(type, name) {
+    persist({ ...data, categories: { ...data.categories, [type]: data.categories[type].filter(c => c !== name) } });
+  }
+
+  function upsertPartner(p) {
+    if (p.id) persist({ ...data, partners: data.partners.map(x => x.id === p.id ? p : x) });
+    else persist({ ...data, partners: [...data.partners, { ...p, id: uid() }] });
+  }
+  function deletePartner(id) { persist({ ...data, partners: data.partners.filter(p => p.id !== id) }); }
+
+  function upsertObligation(o) {
+    if (o.id) persist({ ...data, obligations: data.obligations.map(x => x.id === o.id ? { ...x, ...o } : x) });
+    else persist({ ...data, obligations: [...data.obligations, { ...o, id: uid(), collected: Number(o.collected || 0), createdAt: new Date().toISOString() }] });
+  }
+  function deleteObligation(id) { persist({ ...data, obligations: data.obligations.filter(o => o.id !== id) }); }
+  function adjustObligation(id, delta) {
+    persist({ ...data, obligations: data.obligations.map(o => o.id === id ? { ...o, collected: Math.max(0, Number(o.collected || 0) + delta) } : o) });
+    showToast(delta >= 0 ? "تمت إضافة المبلغ" : "تم خصم المبلغ");
+  }
+  function resetObligation(id) {
+    persist({ ...data, obligations: data.obligations.map(o => o.id === id ? { ...o, collected: 0 } : o) });
+    showToast("تم تصفير الالتزام لشهر جديد");
+  }
+
+  function addDevice(payload) {
+    const txId = uid();
+    const expenseTx = {
+      id: txId, type: "expense", title: `شراء ${payload.name}`, category: "شراء أجهزة",
+      amount: Number(payload.purchasePrice), date: payload.purchaseDate,
+      notes: `اشتريته من: ${payload.sellerName}${payload.sellerPhone ? " - " + payload.sellerPhone : ""}${payload.notes ? " · " + payload.notes : ""}`,
+      createdAt: new Date().toISOString(),
+    };
+    const device = { ...payload, id: uid(), status: "in_stock", expenseTxId: txId, createdAt: new Date().toISOString() };
+    persist({ ...data, devices: [device, ...data.devices], transactions: [expenseTx, ...data.transactions] });
+    showToast("تمت إضافة الجهاز وتسجيل الشراء كمصروف");
+    return device;
+  }
+
+  function updateDevicePurchase(id, payload) {
+    const device = data.devices.find(d => d.id === id);
+    if (!device) return;
+    const updatedDevice = { ...device, ...payload };
+    const transactions = data.transactions.map(t => t.id === device.expenseTxId ? {
+      ...t, title: `شراء ${updatedDevice.name}`, amount: Number(updatedDevice.purchasePrice), date: updatedDevice.purchaseDate,
+      notes: `اشتريته من: ${updatedDevice.sellerName}${updatedDevice.sellerPhone ? " - " + updatedDevice.sellerPhone : ""}${updatedDevice.notes ? " · " + updatedDevice.notes : ""}`,
+    } : t);
+    persist({ ...data, devices: data.devices.map(d => d.id === id ? updatedDevice : d), transactions });
+    showToast("تم تحديث بيانات الجهاز");
+  }
+
+  function sellDevice(id, sale) {
+    const device = data.devices.find(d => d.id === id);
+    if (!device) return;
+    const txId = uid();
+    const incomeTx = {
+      id: txId, type: "income", title: `بيع ${device.name}`, category: "بيع جهاز",
+      amount: Number(sale.salePrice), date: sale.saleDate,
+      notes: `بعته لـ: ${sale.buyerName}${sale.buyerPhone ? " - " + sale.buyerPhone : ""}${sale.notes ? " · " + sale.notes : ""}`,
+      createdAt: new Date().toISOString(),
+    };
+    const updatedDevice = { ...device, ...sale, status: "sold", saleTxId: txId };
+    persist({ ...data, devices: data.devices.map(d => d.id === id ? updatedDevice : d), transactions: [incomeTx, ...data.transactions] });
+    showToast("تم تسجيل البيع كإيراد");
+  }
+
+  function updateDeviceSale(id, sale) {
+    const device = data.devices.find(d => d.id === id);
+    if (!device) return;
+    const updatedDevice = { ...device, ...sale };
+    const transactions = data.transactions.map(t => t.id === device.saleTxId ? {
+      ...t, title: `بيع ${updatedDevice.name}`, amount: Number(updatedDevice.salePrice), date: updatedDevice.saleDate,
+      notes: `بعته لـ: ${updatedDevice.buyerName}${updatedDevice.buyerPhone ? " - " + updatedDevice.buyerPhone : ""}${updatedDevice.notes ? " · " + updatedDevice.notes : ""}`,
+    } : t);
+    persist({ ...data, devices: data.devices.map(d => d.id === id ? updatedDevice : d), transactions });
+    showToast("تم تحديث بيانات البيع");
+  }
+
+  function deleteDevice(id) {
+    const device = data.devices.find(d => d.id === id);
+    if (!device) return;
+    const idsToRemove = [device.expenseTxId, device.saleTxId].filter(Boolean);
+    persist({ ...data, devices: data.devices.filter(d => d.id !== id), transactions: data.transactions.filter(t => !idsToRemove.includes(t.id)) });
+    showToast("تم حذف الجهاز والعمليات المرتبطة به");
+  }
+
+  function upsertSupplier(p) {
+    if (p.id) persist({ ...data, suppliers: data.suppliers.map(x => x.id === p.id ? { ...x, ...p } : x) });
+    else persist({ ...data, suppliers: [...data.suppliers, { ...p, id: uid(), entries: [], createdAt: new Date().toISOString() }] });
+  }
+
+  function deleteSupplier(id) {
+    const supplier = data.suppliers.find(s => s.id === id);
+    const linkedTxIds = (supplier?.entries || []).map(e => e.linkedTxId).filter(Boolean);
+    persist({ ...data, suppliers: data.suppliers.filter(s => s.id !== id), transactions: data.transactions.filter(t => !linkedTxIds.includes(t.id)) });
+    showToast("تم حذف المندوب وسجل ديونه");
+  }
+
+  function addSupplierEntry(supplierId, entry) {
+    const supplier = data.suppliers.find(s => s.id === supplierId);
+    if (!supplier) return;
+    let linkedTxId = null;
+    let transactions = data.transactions;
+    if (entry.type === "payment") {
+      linkedTxId = uid();
+      const tx = {
+        id: linkedTxId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
+        amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", createdAt: new Date().toISOString(),
+      };
+      transactions = [tx, ...transactions];
+    }
+    const newEntry = { id: uid(), type: entry.type, amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId, createdAt: new Date().toISOString() };
+    persist({
+      ...data, transactions,
+      suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: [newEntry, ...s.entries] } : s),
+    });
+    showToast(entry.type === "payment" ? "تم تسجيل التسديد كمصروف" : "تمت إضافة الدين");
+  }
+
+  function deleteSupplierEntry(supplierId, entryId) {
+    const supplier = data.suppliers.find(s => s.id === supplierId);
+    const entry = supplier?.entries.find(e => e.id === entryId);
+    const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
+    persist({
+      ...data, transactions,
+      suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: s.entries.filter(e => e.id !== entryId) } : s),
+    });
+  }
+
+  function saveClosing(closing) {
+    const existing = data.closings.find(c => c.date === closing.date);
+    if (existing) {
+      persist({ ...data, closings: data.closings.map(c => c.date === closing.date ? { ...c, ...closing, closedAt: new Date().toISOString() } : c) });
+      showToast("تم تحديث تقفيلة اليوم");
+    } else {
+      persist({ ...data, closings: [{ ...closing, id: uid(), closedAt: new Date().toISOString() }, ...data.closings] });
+      showToast("تم حفظ تقفيلة اليوم");
+    }
+  }
+
+  function exportLedgerCSV() {
+    const rows = [["التاريخ", "النوع", "الاسم", "التصنيف", "المبلغ", "الملاحظات"]];
+    for (const t of data.transactions) rows.push([t.date, TYPE_META[t.type].label, t.type === "withdraw" ? t.person : t.title, t.category || "", t.amount, t.notes || ""]);
+    downloadFile(`دفتر-العمليات-${todayISO()}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
+  }
+  function exportMonthCSV(mKey, label) {
+    const rows = [["التاريخ", "النوع", "الاسم", "التصنيف", "المبلغ", "الملاحظات"]];
+    for (const t of data.transactions.filter(t => monthKey(t.date) === mKey)) rows.push([t.date, TYPE_META[t.type].label, t.type === "withdraw" ? t.person : t.title, t.category || "", t.amount, t.notes || ""]);
+    downloadFile(`تقرير-${label}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
+  }
+  function exportYearCSV(yt, year) {
+    const rows = [["الشهر", "الإيرادات", "المصروفات", "السحوبات", "صافي الربح"]];
+    yt.byMonth.forEach(m => rows.push([m.name, m.income, m.expense, m.withdraw, m.net]));
+    rows.push(["الإجمالي", yt.income, yt.expense, yt.withdraw, yt.net]);
+    downloadFile(`تقرير-سنوي-${year}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
+  }
+  function exportDayCSV(dateStr) {
+    const rows = [["التاريخ", "النوع", "الاسم", "التصنيف", "المبلغ", "الملاحظات"]];
+    for (const t of data.transactions.filter(t => t.date === dateStr)) rows.push([t.date, TYPE_META[t.type].label, t.type === "withdraw" ? t.person : t.title, t.category || "", t.amount, t.notes || ""]);
+    downloadFile(`تقفيلة-${dateStr}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
+  }
+
+  return (
+    <div dir="rtl" className="min-h-[700px] bg-[#F6F7F9] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
+      <TopBar shopName={data.settings.shopName} balance={totals.balance} currency={data.settings.currency}
+        cashAmount={data.settings.cashAmount} networkAmount={data.settings.networkAmount} onUpdateCashNetwork={updateSettings} />
+
+      <div className="flex-1 overflow-y-auto pb-24 px-4 pt-4">
+        {tab === "dashboard" && (
+          <Dashboard data={data} totals={totals} curMonth={curMonth} monthTotals={monthTotals}
+            onOpenTx={(item) => { setAddType(item.type); setEditItem(item); setAddOpen(true); }} />
+        )}
+        {tab === "ledger" && (
+          <Ledger data={data}
+            onEdit={(item) => { setAddType(item.type); setEditItem(item); setAddOpen(true); }}
+            onDelete={(item) => setConfirmDelete(item)}
+            onExport={exportLedgerCSV} />
+        )}
+        {tab === "reports" && (
+          <Reports data={data} monthTotals={monthTotals} yearTotals={yearTotals} curYear={curYear}
+            initialBalance={data.settings.initialBalance} exportMonthCSV={exportMonthCSV} exportYearCSV={exportYearCSV} />
+        )}
+        {tab === "obligations" && (
+          <Obligations data={data} onSave={upsertObligation} onDelete={deleteObligation} onAdjust={adjustObligation} onReset={resetObligation} />
+        )}
+        {tab === "devices" && (
+          <Devices data={data} onAdd={addDevice} onUpdatePurchase={updateDevicePurchase} onSell={sellDevice} onUpdateSale={updateDeviceSale} onDelete={deleteDevice} />
+        )}
+        {tab === "suppliers" && (
+          <Suppliers data={data} onSave={upsertSupplier} onDelete={deleteSupplier} onAddEntry={addSupplierEntry} onDeleteEntry={deleteSupplierEntry} />
+        )}
+        {tab === "closing" && (
+          <DailyClosing data={data} totals={totals} onSaveClosing={saveClosing} exportDayCSV={exportDayCSV} />
+        )}
+        {tab === "more" && (
+          <MoreMenu setTab={setTab} />
+        )}
+        {tab === "partners" && (
+          <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
+        )}
+        {tab === "settings" && (
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} />
+        )}
+      </div>
+
+      <QuickAddBar onPick={(type) => { setAddType(type); setEditItem(null); setAddOpen(true); }} />
+      <BottomNav tab={tab} setTab={setTab} />
+
+      {addOpen && (
+        <TxModal type={addType} setType={setAddType} categories={data.categories} initial={editItem} currency={data.settings.currency}
+          onClose={() => { setAddOpen(false); setEditItem(null); }} onSave={upsertTransaction} />
+      )}
+      {confirmDelete && (
+        <ConfirmModal title="حذف العملية"
+          message={`هل تريد حذف "${confirmDelete.title || confirmDelete.person}" بمبلغ ${fmt(confirmDelete.amount)} ${data.settings.currency}؟`}
+          onCancel={() => setConfirmDelete(null)} onConfirm={() => deleteTransaction(confirmDelete.id)} />
+      )}
+      {toast && (
+        <div className={`fixed bottom-24 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full text-sm text-white shadow-lg z-50 ${toast.kind === "error" ? "bg-red-500" : "bg-slate-800"}`}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopBar({ shopName, balance, currency, cashAmount, networkAmount, onUpdateCashNetwork }) {
+  const [cash, setCash] = useState(cashAmount);
+  const [network, setNetwork] = useState(networkAmount);
+  useEffect(() => { setCash(cashAmount); }, [cashAmount]);
+  useEffect(() => { setNetwork(networkAmount); }, [networkAmount]);
+
+  return (
+    <div className="px-5 pt-6 pb-5 bg-[#12213B] text-white rounded-b-3xl shadow-sm">
+      <div className="text-xs text-white/60 mb-1">{shopName}</div>
+      <div className="flex items-end justify-between mb-3">
+        <div>
+          <div className="text-xs text-white/60 mb-1">الرصيد الحالي</div>
+          <div className="text-3xl font-bold num tracking-tight">{fmt(balance)} <span className="text-base font-normal text-white/70">{currency}</span></div>
+        </div>
+        <span className="text-3xl">💰</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2">
+          <div className="text-[10px] text-white/50 mb-0.5">💵 كاش عندك (تحدّثه بنفسك)</div>
+          <input type="number" value={cash} onChange={e => setCash(e.target.value)}
+            onBlur={() => onUpdateCashNetwork({ cashAmount: Number(cash || 0) })}
+            className="bg-transparent text-sm font-bold num w-full outline-none border-b border-white/0 focus:border-white/40" />
+        </div>
+        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2">
+          <div className="text-[10px] text-white/50 mb-0.5">💳 شبكة عندك (تحدّثها بنفسك)</div>
+          <input type="number" value={network} onChange={e => setNetwork(e.target.value)}
+            onBlur={() => onUpdateCashNetwork({ networkAmount: Number(network || 0) })}
+            className="bg-transparent text-sm font-bold num w-full outline-none border-b border-white/0 focus:border-white/40" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx }) {
+  const mt = monthTotals(curMonth);
+  const recent = data.transactions.slice(0, 6);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard icon="📈" color="#0f9d6e" label={`إيرادات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label={`مصروفات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات الشهر" value={mt.withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح الشهر" value={mt.net} currency={data.settings.currency} />
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
+        <div>
+          <div className="text-xs text-slate-400 mb-1">الأرباح المتجمعة منذ البداية</div>
+          <div className="text-xl font-bold num text-slate-800">{fmt(totals.netProfit)} {data.settings.currency}</div>
+        </div>
+        <span className="text-2xl">📊</span>
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-3">آخر العمليات</div>
+        {recent.length === 0 ? (
+          <div className="text-center text-slate-400 text-sm py-6">لا توجد عمليات بعد، ابدأ بإضافة أول عملية</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {recent.map(t => <TxRow key={t.id} t={t} onClick={() => onOpenTx(t)} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ icon, color, label, value, currency }) {
+  return (
+    <div className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+      <div className="w-8 h-8 rounded-full flex items-center justify-center mb-2 text-sm" style={{ background: color + "1A" }}>{icon}</div>
+      <div className="text-[11px] text-slate-400 mb-0.5">{label}</div>
+      <div className="text-lg font-bold num text-slate-800 leading-tight">{fmt(value)}</div>
+      <div className="text-[10px] text-slate-400">{currency}</div>
+    </div>
+  );
+}
+
+function TxRow({ t, onClick, onEdit, onDelete }) {
+  const meta = TYPE_META[t.type];
+  const sign = t.type === "income" ? "+" : "-";
+  return (
+    <div className="flex items-center gap-3 py-2.5 cursor-pointer" onClick={onClick}>
+      <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 font-bold" style={{ background: meta.bg, color: meta.color }}>{meta.icon}</div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium text-slate-700 truncate">{t.type === "withdraw" ? t.person : t.title}</div>
+        <div className="text-[11px] text-slate-400">{t.category || (t.type === "withdraw" ? "سحب" : "")} · {t.date}</div>
+      </div>
+      <div className="text-sm font-bold num shrink-0" style={{ color: meta.color }}>{sign}{fmt(t.amount)}</div>
+      {(onEdit || onDelete) && (
+        <div className="flex items-center gap-1 shrink-0">
+          {onEdit && <button onClick={(e) => { e.stopPropagation(); onEdit(t); }} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>}
+          {onDelete && <button onClick={(e) => { e.stopPropagation(); onDelete(t); }} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Ledger({ data, onEdit, onDelete, onExport }) {
+  const [q, setQ] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [catFilter, setCatFilter] = useState("all");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const allCats = useMemo(() => [...new Set([...data.categories.income, ...data.categories.expense])], [data.categories]);
+
+  const filtered = useMemo(() => data.transactions.filter(t => {
+    if (typeFilter !== "all" && t.type !== typeFilter) return false;
+    if (catFilter !== "all" && t.category !== catFilter) return false;
+    if (from && t.date < from) return false;
+    if (to && t.date > to) return false;
+    if (q) {
+      const name = (t.type === "withdraw" ? t.person : t.title) || "";
+      const hay = (name + " " + (t.notes || "") + " " + (t.category || "")).toLowerCase();
+      if (!hay.includes(q.toLowerCase())) return false;
+    }
+    return true;
+  }), [data.transactions, q, typeFilter, catFilter, from, to]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">دفتر العمليات</div>
+        <button onClick={onExport} className="flex items-center gap-1 text-xs bg-white border border-slate-200 rounded-full px-3 py-1.5 text-slate-600">⬇ تصدير CSV</button>
+      </div>
+      <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 space-y-2">
+        <div className="relative">
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔍</span>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="بحث..." className="w-full bg-slate-50 rounded-xl py-2 pr-9 pl-3 text-sm outline-none" />
+        </div>
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {[["all", "الكل"], ["income", "إيراد"], ["expense", "مصروف"], ["withdraw", "سحب"]].map(([v, l]) => (
+            <button key={v} onClick={() => setTypeFilter(v)} className={`shrink-0 text-xs px-3 py-1.5 rounded-full border ${typeFilter === v ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>{l}</button>
+          ))}
+        </div>
+        <select value={catFilter} onChange={e => setCatFilter(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none">
+          <option value="all">كل التصنيفات</option>
+          {allCats.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <div className="flex gap-2">
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="flex-1 bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none" />
+          <input type="date" value={to} onChange={e => setTo(e.target.value)} className="flex-1 bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none" />
+        </div>
+      </div>
+      <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100">
+        {filtered.length === 0 ? (
+          <div className="text-center text-slate-400 text-sm py-8">لا توجد نتائج مطابقة</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {filtered.map(t => <TxRow key={t.id} t={t} onClick={() => onEdit(t)} onEdit={onEdit} onDelete={onDelete} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TrendChart({ points }) {
+  const W = 320, H = 160, PAD = 20;
+  const maxVal = Math.max(1, ...points.flatMap(p => [p.income, p.expense, Math.abs(p.net)]));
+  const stepX = (W - PAD * 2) / Math.max(1, points.length - 1);
+  function toXY(v, i) {
+    const x = PAD + i * stepX;
+    const y = H - PAD - (v / maxVal) * (H - PAD * 2);
+    return [x, y];
+  }
+  function pathFor(key) {
+    return points.map((p, i) => { const [x, y] = toXY(p[key], i); return (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1); }).join(" ");
+  }
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-40">
+        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#eef1f4" strokeWidth="1" />
+        <path d={pathFor("income")} fill="none" stroke="#0f9d6e" strokeWidth="2" />
+        <path d={pathFor("expense")} fill="none" stroke="#d64545" strokeWidth="2" />
+        <path d={pathFor("net")} fill="none" stroke="#3B82F6" strokeWidth="2" />
+      </svg>
+      <div className="flex items-center gap-4 justify-center text-[11px] text-slate-500 mt-1">
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#0f9d6e" }}></span>إيرادات</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#d64545" }}></span>مصروفات</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#3B82F6" }}></span>ربح</span>
+      </div>
+    </div>
+  );
+}
+
+function Reports({ data, monthTotals, yearTotals, curYear, initialBalance, exportMonthCSV, exportYearCSV }) {
+  const [year, setYear] = useState(curYear);
+  const [openMonth, setOpenMonth] = useState(null);
+  const yt = useMemo(() => yearTotals(year), [yearTotals, year]);
+  let running = Number(initialBalance || 0);
+  const monthsWithBalance = yt.byMonth.map(m => { running += m.income - m.expense - m.withdraw; return { ...m, endBalance: running }; });
+  const years = useMemo(() => { const set = new Set(data.transactions.map(t => t.date.slice(0, 4))); set.add(curYear); return [...set].sort().reverse(); }, [data.transactions, curYear]);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">التقارير</div>
+        <select value={year} onChange={e => setYear(e.target.value)} className="bg-white border border-slate-200 rounded-xl text-sm px-3 py-1.5">
+          {years.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard icon="📈" color="#0f9d6e" label="إيرادات السنة" value={yt.income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label="مصروفات السنة" value={yt.expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات السنة" value={yt.withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح السنة" value={yt.net} currency={data.settings.currency} />
+      </div>
+      <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-2">الإيرادات والمصروفات والربح خلال السنة</div>
+        <TrendChart points={yt.byMonth} />
+      </div>
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="flex items-center justify-between p-3 pb-0">
+          <div className="font-semibold text-sm">الحساب الشهري</div>
+          <button onClick={() => exportYearCSV(yt, year)} className="flex items-center gap-1 text-[11px] text-slate-500">⬇ تصدير السنة</button>
+        </div>
+        <div className="divide-y divide-slate-100 mt-2">
+          {monthsWithBalance.map(m => (
+            <div key={m.mKey}>
+              <button onClick={() => setOpenMonth(openMonth === m.mKey ? null : m.mKey)} className="w-full flex items-center justify-between px-3 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400 text-xs">{openMonth === m.mKey ? "▲" : "▼"}</span>
+                  <span className="text-sm font-medium">{m.name}</span>
+                </div>
+                <span className={`text-sm font-bold num ${m.net >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt(m.net)}</span>
+              </button>
+              {openMonth === m.mKey && (
+                <div className="px-3 pb-3 pt-1 bg-slate-50">
+                  <div className="grid grid-cols-2 gap-2 text-xs mb-2">
+                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">إيرادات</span><span className="font-semibold num text-emerald-600">{fmt(m.income)}</span></div>
+                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">مصروفات</span><span className="font-semibold num text-red-500">{fmt(m.expense)}</span></div>
+                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">سحوبات</span><span className="font-semibold num text-amber-600">{fmt(m.withdraw)}</span></div>
+                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">رصيد نهاية الشهر</span><span className="font-semibold num">{fmt(m.endBalance)}</span></div>
+                  </div>
+                  <button onClick={() => exportMonthCSV(m.mKey, m.name + "-" + year)} className="text-[11px] text-slate-500 flex items-center gap-1 mb-2">⬇ تصدير هذا الشهر</button>
+                  <div className="divide-y divide-slate-100 bg-white rounded-lg">
+                    {data.transactions.filter(t => monthKey(t.date) === m.mKey).length === 0 ? (
+                      <div className="text-center text-slate-400 text-xs py-4">لا توجد عمليات هذا الشهر</div>
+                    ) : data.transactions.filter(t => monthKey(t.date) === m.mKey).map(t => (
+                      <div key={t.id} className="px-2"><TxRow t={t} onClick={() => {}} /></div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Obligations({ data, onSave, onDelete, onAdjust, onReset }) {
+  const [form, setForm] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const totalTarget = data.obligations.reduce((s, o) => s + Number(o.target || 0), 0);
+  const totalCollected = data.obligations.reduce((s, o) => s + Number(o.collected || 0), 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">الالتزامات الثابتة</div>
+        <button onClick={() => setForm({ name: "", target: "", collected: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة التزام</button>
+      </div>
+      <div className="text-xs text-slate-400 -mt-2">مساحة مستقلة لمتابعة المصاريف الثابتة الشهرية (إيجار، رواتب...) بدون ما تدخل في حساب الأرباح تلقائيًا، إلا إذا سجلتها أيضًا كمصروف في دفتر العمليات.</div>
+      {data.obligations.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا توجد التزامات مضافة بعد، مثل الإيجار أو الرواتب</div>
+      ) : (
+        <>
+          <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
+            <div>
+              <div className="text-xs text-slate-400 mb-1">إجمالي المجمّع من الالتزامات</div>
+              <div className="text-lg font-bold num">{fmt(totalCollected)} <span className="text-xs font-normal text-slate-400">من أصل {fmt(totalTarget)} {data.settings.currency}</span></div>
+            </div>
+            <span className="text-2xl">🎯</span>
+          </div>
+          <div className="space-y-3">
+            {data.obligations.map(o => (
+              <ObligationCard key={o.id} o={o} currency={data.settings.currency} onEdit={() => setForm(o)} onDelete={() => setConfirmDel(o)} onAdjust={(d) => onAdjust(o.id, d)} onReset={() => setConfirmReset(o)} />
+            ))}
+          </div>
+        </>
+      )}
+      {form && <ObligationModal initial={form} currency={data.settings.currency} onClose={() => setForm(null)} onSave={(o) => { onSave(o); setForm(null); }} />}
+      {confirmReset && <ConfirmModal title="تصفير الالتزام" message={`سيتم تصفير المبلغ المجمّع لـ "${confirmReset.name}" والبدء من جديد. هل تريد المتابعة؟`} onCancel={() => setConfirmReset(null)} onConfirm={() => { onReset(confirmReset.id); setConfirmReset(null); }} />}
+      {confirmDel && <ConfirmModal title="حذف الالتزام" message={`هل تريد حذف "${confirmDel.name}" نهائيًا؟`} onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />}
+    </div>
+  );
+}
+
+function ObligationCard({ o, currency, onEdit, onDelete, onAdjust, onReset }) {
+  const [amount, setAmount] = useState("");
+  const target = Number(o.target || 0);
+  const collected = Number(o.collected || 0);
+  const pct = target > 0 ? Math.min(100, Math.round((collected / target) * 100)) : 0;
+  const remaining = Math.max(0, target - collected);
+  const done = target > 0 && collected >= target;
+  function apply(sign) { const v = Number(amount); if (!v || v <= 0) return; onAdjust(sign * v); setAmount(""); }
+
+  return (
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+      <div className="flex items-start justify-between mb-2">
+        <div><div className="font-semibold text-sm">{o.name}</div>{o.notes && <div className="text-[11px] text-slate-400">{o.notes}</div>}</div>
+        <div className="flex items-center gap-1">
+          <button onClick={onEdit} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>
+          <button onClick={onDelete} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+        </div>
+      </div>
+      <div className="text-xs text-slate-500 mb-1.5">جمعت <span className="font-bold num text-slate-800">{fmt(collected)}</span> من أصل <span className="font-bold num text-slate-800">{fmt(target)}</span> {currency}</div>
+      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: done ? "#0f9d6e" : "#3B82F6" }} />
+      </div>
+      <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
+        <span>{pct}%</span><span>{done ? "مكتمل ✓" : `متبقي ${fmt(remaining)} ${currency}`}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="المبلغ" className="flex-1 bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none num" />
+        <button onClick={() => apply(1)} className="w-9 h-9 shrink-0 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">＋</button>
+        <button onClick={() => apply(-1)} className="w-9 h-9 shrink-0 rounded-xl bg-red-50 text-red-500 flex items-center justify-center font-bold">−</button>
+      </div>
+      <button onClick={onReset} className="text-[11px] text-slate-400 mt-2">تصفير لبداية شهر جديد</button>
+    </div>
+  );
+}
+
+function ObligationModal({ initial, currency, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [target, setTarget] = useState(initial.target ?? "");
+  const [collected, setCollected] = useState(initial.collected ?? "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [err, setErr] = useState("");
+  function save() {
+    if (!name.trim()) return setErr("اسم الالتزام مطلوب");
+    if (target === "" || Number(target) < 0) return setErr("المبلغ المستهدف مطلوب");
+    onSave({ id: initial.id, name: name.trim(), target: Number(target), collected: Number(collected || 0), notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={initial.id ? "تعديل التزام" : "إضافة التزام ثابت"}>
+      <Field label="اسم الالتزام (مثل: إيجار المحل، رواتب)"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label={`المبلغ المستهدف شهريًا (${currency})`}><input type="number" value={target} onChange={e => setTarget(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label={`المبلغ المجمّع حاليًا (${currency})`}><input type="number" value={collected} onChange={e => setCollected(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
+  );
+}
+
+function Partners({ data, totals, onSave, onDelete }) {
+  const [form, setForm] = useState(null);
+  const [splitBase, setSplitBase] = useState("net");
+  const [customAmount, setCustomAmount] = useState("");
+  const totalPct = data.partners.reduce((s, p) => s + Number(p.percentage || 0), 0);
+  const baseAmount = splitBase === "net" ? totals.netProfit : Number(customAmount || 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">الشركاء</div>
+        <button onClick={() => setForm({ name: "", percentage: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة شريك</button>
+      </div>
+      {data.partners.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد شركاء مضافون بعد</div>
+      ) : (
+        <div className="space-y-2">
+          {data.partners.map(p => (
+            <div key={p.id} className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 flex items-center justify-between">
+              <div><div className="font-semibold text-sm">{p.name}</div><div className="text-xs text-slate-400">{p.percentage ? `${p.percentage}%` : "نسبة غير محددة"}{p.notes ? " · " + p.notes : ""}</div></div>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setForm(p)} className="p-2 text-slate-400 hover:text-slate-700">✎</button>
+                <button onClick={() => onDelete(p.id)} className="p-2 text-slate-400 hover:text-red-500">🗑</button>
+              </div>
+            </div>
+          ))}
+          {totalPct > 0 && (
+            <div className={`text-xs rounded-xl px-3 py-2 ${totalPct === 100 ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-700"}`}>
+              مجموع النسب الحالي: {totalPct}% {totalPct !== 100 && "— يجب أن يكون المجموع 100% لاحتساب التقسيم بدقة"}
+            </div>
+          )}
+        </div>
+      )}
+      {data.partners.length > 0 && (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3">
+          <div className="font-semibold text-sm">محاكاة تقسيم الأرباح</div>
+          <div className="flex gap-2">
+            <button onClick={() => setSplitBase("net")} className={`flex-1 text-xs py-1.5 rounded-lg border ${splitBase === "net" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>صافي الربح المتجمع</button>
+            <button onClick={() => setSplitBase("custom")} className={`flex-1 text-xs py-1.5 rounded-lg border ${splitBase === "custom" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>مبلغ مخصص</button>
+          </div>
+          {splitBase === "custom" && <input type="number" value={customAmount} onChange={e => setCustomAmount(e.target.value)} placeholder="أدخل المبلغ" className="w-full bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none" />}
+          <div className="text-xs text-slate-400">المبلغ المستخدم للتقسيم: <span className="font-semibold num text-slate-700">{fmt(baseAmount)} {data.settings.currency}</span></div>
+          <div className="divide-y divide-slate-100">
+            {data.partners.map(p => (
+              <div key={p.id} className="flex items-center justify-between py-2 text-sm">
+                <span>{p.name} <span className="text-slate-400 text-xs">({p.percentage || 0}%)</span></span>
+                <span className="font-bold num">{fmt(baseAmount * (Number(p.percentage || 0) / 100))} {data.settings.currency}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {form && <PartnerModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
+    </div>
+  );
+}
+
+function PartnerModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [percentage, setPercentage] = useState(initial.percentage ?? "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [err, setErr] = useState("");
+  function save() {
+    if (!name.trim()) return setErr("اسم الشريك مطلوب");
+    if (percentage !== "" && (Number(percentage) < 0 || Number(percentage) > 100)) return setErr("النسبة يجب أن تكون بين 0 و 100");
+    onSave({ id: initial.id, name: name.trim(), percentage: percentage === "" ? "" : Number(percentage), notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={initial.id ? "تعديل شريك" : "إضافة شريك"}>
+      <Field label="اسم الشريك"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="نسبة الشراكة % (اختياري)"><input type="number" value={percentage} onChange={e => setPercentage(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
+  );
+}
+
+function Devices({ data, onAdd, onUpdatePurchase, onSell, onUpdateSale, onDelete }) {
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [q, setQ] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [editDevice, setEditDevice] = useState(null);
+  const [sellDevice, setSellDeviceState] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const filtered = useMemo(() => data.devices.filter(d => {
+    if (statusFilter !== "all" && d.status !== statusFilter) return false;
+    if (q) {
+      const hay = (d.name + " " + (d.sellerName || "") + " " + (d.buyerName || "") + " " + (d.imei || "")).toLowerCase();
+      if (!hay.includes(q.toLowerCase())) return false;
+    }
+    return true;
+  }), [data.devices, statusFilter, q]);
+
+  const inStockCount = data.devices.filter(d => d.status === "in_stock").length;
+  const soldDevices = data.devices.filter(d => d.status === "sold");
+  const totalProfit = soldDevices.reduce((s, d) => s + (Number(d.salePrice || 0) - Number(d.purchasePrice || 0)), 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">الأجهزة</div>
+        <button onClick={() => setAddOpen(true)} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ شراء جهاز</button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+          <div className="text-[11px] text-slate-400 mb-1">بالمخزون حاليًا</div>
+          <div className="text-lg font-bold num">{inStockCount}</div>
+        </div>
+        <div className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+          <div className="text-[11px] text-slate-400 mb-1">أرباح البيع والشراء</div>
+          <div className={`text-lg font-bold num ${totalProfit >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt(totalProfit)} {data.settings.currency}</div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 space-y-2">
+        <div className="relative">
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔍</span>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="ابحث باسم الجهاز أو الزبون..." className="w-full bg-slate-50 rounded-xl py-2 pr-9 pl-3 text-sm outline-none" />
+        </div>
+        <div className="flex gap-2">
+          {[["all", "الكل"], ["in_stock", "بالمخزون"], ["sold", "مباع"]].map(([v, l]) => (
+            <button key={v} onClick={() => setStatusFilter(v)} className={`text-xs px-3 py-1.5 rounded-full border ${statusFilter === v ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا توجد أجهزة مطابقة</div>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map(d => (
+            <DeviceCard key={d.id} d={d} currency={data.settings.currency}
+              onEdit={() => setEditDevice(d)}
+              onSell={() => setSellDeviceState(d)}
+              onDelete={() => setConfirmDel(d)} />
+          ))}
+        </div>
+      )}
+
+      {addOpen && <DeviceModal currency={data.settings.currency} onClose={() => setAddOpen(false)} onSave={(payload) => { onAdd(payload); setAddOpen(false); }} />}
+      {editDevice && <DeviceModal currency={data.settings.currency} initial={editDevice} onClose={() => setEditDevice(null)} onSave={(payload) => { onUpdatePurchase(editDevice.id, payload); setEditDevice(null); }} />}
+      {sellDevice && <SellModal device={sellDevice} currency={data.settings.currency} onClose={() => setSellDeviceState(null)} onSave={(sale) => { onSell(sellDevice.id, sale); setSellDeviceState(null); }} onUpdate={(sale) => { onUpdateSale(sellDevice.id, sale); setSellDeviceState(null); }} />}
+      {confirmDel && (
+        <ConfirmModal title="حذف الجهاز" message={`سيتم حذف "${confirmDel.name}" وأي عمليات شراء/بيع مرتبطة به من السجل المالي. متابعة؟`}
+          onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
+      )}
+    </div>
+  );
+}
+
+function DeviceCard({ d, currency, onEdit, onSell, onDelete }) {
+  const sold = d.status === "sold";
+  const profit = sold ? Number(d.salePrice || 0) - Number(d.purchasePrice || 0) : null;
+  return (
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+      <div className="flex items-start justify-between mb-2">
+        <div>
+          <div className="font-semibold text-sm flex items-center gap-2">
+            {d.name}
+            <span className={`text-[10px] px-2 py-0.5 rounded-full ${d.condition === "جديد" ? "bg-blue-50 text-blue-600" : "bg-slate-100 text-slate-500"}`}>{d.condition}</span>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full ${sold ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"}`}>{sold ? "مباع" : "بالمخزون"}</span>
+          </div>
+          {(d.storage || d.color) && <div className="text-[11px] text-slate-400 mt-0.5">{[d.storage, d.color].filter(Boolean).join(" · ")}</div>}
+          {d.imei && <div className="text-[11px] text-slate-400">IMEI: {d.imei}</div>}
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={onEdit} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>
+          <button onClick={onDelete} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+        </div>
+      </div>
+
+      <div className="text-xs text-slate-500 space-y-1 mb-2">
+        <div>اشتريته من <span className="font-medium text-slate-700">{d.sellerName}</span>{d.sellerPhone ? ` (${d.sellerPhone})` : ""} بمبلغ <span className="font-bold num text-slate-800">{fmt(d.purchasePrice)}</span> {currency} — {d.purchaseDate}</div>
+        {sold && (
+          <div>بعته لـ <span className="font-medium text-slate-700">{d.buyerName}</span>{d.buyerPhone ? ` (${d.buyerPhone})` : ""} بمبلغ <span className="font-bold num text-slate-800">{fmt(d.salePrice)}</span> {currency} — {d.saleDate}</div>
+        )}
+      </div>
+
+      {sold ? (
+        <div className={`text-sm font-bold num ${profit >= 0 ? "text-emerald-600" : "text-red-500"}`}>الربح: {fmt(profit)} {currency}</div>
+      ) : (
+        <button onClick={onSell} className="w-full bg-emerald-500 text-white rounded-xl py-2 text-sm font-semibold">تسجيل عملية بيع</button>
+      )}
+    </div>
+  );
+}
+
+function DeviceModal({ initial, currency, onClose, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [condition, setCondition] = useState(initial?.condition || "مستعمل");
+  const [storage, setStorage] = useState(initial?.storage || "");
+  const [color, setColor] = useState(initial?.color || "");
+  const [imei, setImei] = useState(initial?.imei || "");
+  const [purchasePrice, setPurchasePrice] = useState(initial?.purchasePrice ?? "");
+  const [purchaseDate, setPurchaseDate] = useState(initial?.purchaseDate || todayISO());
+  const [sellerName, setSellerName] = useState(initial?.sellerName || "");
+  const [sellerPhone, setSellerPhone] = useState(initial?.sellerPhone || "");
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [err, setErr] = useState("");
+
+  function save() {
+    if (!name.trim()) return setErr("اسم/موديل الجهاز مطلوب");
+    const pp = Number(purchasePrice);
+    if (!pp || pp <= 0) return setErr("سعر الشراء يجب أن يكون أكبر من صفر");
+    if (!purchaseDate) return setErr("تاريخ الشراء مطلوب");
+    if (!sellerName.trim()) return setErr("اسم الزبون اللي اشتريت منه مطلوب");
+    onSave({
+      name: name.trim(), condition, storage: storage.trim(), color: color.trim(), imei: imei.trim(),
+      purchasePrice: pp, purchaseDate, sellerName: sellerName.trim(), sellerPhone: sellerPhone.trim(), notes: notes.trim(),
+    });
+  }
+
+  return (
+    <Sheet onClose={onClose} title={initial ? "تعديل بيانات الجهاز" : "تسجيل شراء جهاز"}>
+      <Field label="اسم/موديل الجهاز"><input value={name} onChange={e => setName(e.target.value)} placeholder="مثال: iPhone 13 Pro" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="الحالة">
+          <select value={condition} onChange={e => setCondition(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none">
+            <option value="مستعمل">مستعمل</option>
+            <option value="جديد">جديد</option>
+          </select>
+        </Field>
+        <Field label="السعة (اختياري)"><input value={storage} onChange={e => setStorage(e.target.value)} placeholder="256GB" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="اللون (اختياري)"><input value={color} onChange={e => setColor(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <Field label="IMEI / رقم تسلسلي (اختياري)"><input value={imei} onChange={e => setImei(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label={`سعر الشراء (${currency})`}><input type="number" value={purchasePrice} onChange={e => setPurchasePrice(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+        <Field label="تاريخ الشراء"><input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="اسم الزبون (اللي اشتريت منه)"><input value={sellerName} onChange={e => setSellerName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <Field label="رقم جواله (اختياري)"><input value={sellerPhone} onChange={e => setSellerPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">{initial ? "حفظ التعديل" : "حفظ وتسجيله كمصروف"}</button>
+    </Sheet>
+  );
+}
+
+function SellModal({ device, currency, onClose, onSave, onUpdate }) {
+  const alreadySold = device.status === "sold";
+  const [salePrice, setSalePrice] = useState(device.salePrice ?? "");
+  const [saleDate, setSaleDate] = useState(device.saleDate || todayISO());
+  const [buyerName, setBuyerName] = useState(device.buyerName || "");
+  const [buyerPhone, setBuyerPhone] = useState(device.buyerPhone || "");
+  const [notes, setNotes] = useState(alreadySold ? (device.notes || "") : "");
+  const [err, setErr] = useState("");
+
+  function save() {
+    const sp = Number(salePrice);
+    if (!sp || sp <= 0) return setErr("سعر البيع يجب أن يكون أكبر من صفر");
+    if (!saleDate) return setErr("تاريخ البيع مطلوب");
+    if (!buyerName.trim()) return setErr("اسم الزبون المشتري مطلوب");
+    const payload = { salePrice: sp, saleDate, buyerName: buyerName.trim(), buyerPhone: buyerPhone.trim(), notes: notes.trim() };
+    if (alreadySold) onUpdate(payload); else onSave(payload);
+  }
+
+  return (
+    <Sheet onClose={onClose} title={`تسجيل بيع — ${device.name}`}>
+      <div className="text-xs text-slate-400 mb-3">سعر الشراء: <span className="font-semibold num text-slate-700">{fmt(device.purchasePrice)} {currency}</span></div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label={`سعر البيع (${currency})`}><input type="number" value={salePrice} onChange={e => setSalePrice(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+        <Field label="تاريخ البيع"><input type="date" value={saleDate} onChange={e => setSaleDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="اسم الزبون المشتري"><input value={buyerName} onChange={e => setBuyerName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <Field label="رقم جواله (اختياري)"><input value={buyerPhone} onChange={e => setBuyerPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      </div>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {salePrice && (
+        <div className="text-xs text-slate-500 mb-2">الربح المتوقع: <span className={`font-bold num ${Number(salePrice) - Number(device.purchasePrice) >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt(Number(salePrice) - Number(device.purchasePrice))} {currency}</span></div>
+      )}
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-emerald-500 text-white rounded-xl py-3 text-sm font-semibold">{alreadySold ? "حفظ تعديل البيع" : "حفظ وتسجيله كإيراد"}</button>
+    </Sheet>
+  );
+}
+
+function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
+  const [form, setForm] = useState(null);
+  const [entryFor, setEntryFor] = useState(null); // {supplier, type}
+  const [expanded, setExpanded] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const totalDebt = data.suppliers.reduce((sum, s) => {
+    const bal = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
+    return sum + Math.max(0, bal);
+  }, 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">المناديب والموردين</div>
+        <button onClick={() => setForm({ name: "", phone: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة مندوب</button>
+      </div>
+
+      {data.suppliers.length > 0 && (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
+          <div>
+            <div className="text-xs text-slate-400 mb-1">إجمالي المديونية على المحل</div>
+            <div className={`text-lg font-bold num ${totalDebt > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(totalDebt)} {data.settings.currency}</div>
+          </div>
+          <span className="text-2xl">🚚</span>
+        </div>
+      )}
+
+      {data.suppliers.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد مناديب مضافون بعد</div>
+      ) : (
+        <div className="space-y-3">
+          {data.suppliers.map(s => {
+            const balance = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
+            const open = expanded === s.id;
+            return (
+              <div key={s.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <div className="flex items-start justify-between mb-2">
+                  <div>
+                    <div className="font-semibold text-sm">{s.name}</div>
+                    <div className="text-[11px] text-slate-400">{s.phone}{s.notes ? " · " + s.notes : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setForm(s)} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>
+                    <button onClick={() => setConfirmDel(s)} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs text-slate-400">الرصيد المستحق عليك</span>
+                  <span className={`text-base font-bold num ${balance > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(balance)} {data.settings.currency}</span>
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <button onClick={() => setEntryFor({ supplier: s, type: "debt" })} className="flex-1 bg-red-50 text-red-600 rounded-xl py-2 text-xs font-semibold">＋ دين جديد (استلمت قطع)</button>
+                  <button onClick={() => setEntryFor({ supplier: s, type: "payment" })} className="flex-1 bg-emerald-50 text-emerald-600 rounded-xl py-2 text-xs font-semibold">✓ تسديد دفعة</button>
+                </div>
+                <button onClick={() => setExpanded(open ? null : s.id)} className="text-[11px] text-slate-400">{open ? "إخفاء السجل ▲" : "عرض سجل الديون والتسديد ▼"}</button>
+                {open && (
+                  <div className="mt-2 divide-y divide-slate-100 bg-slate-50 rounded-xl">
+                    {s.entries.length === 0 ? (
+                      <div className="text-center text-slate-400 text-xs py-4">لا توجد عمليات مسجلة بعد</div>
+                    ) : s.entries.map(e => (
+                      <div key={e.id} className="flex items-center justify-between px-3 py-2">
+                        <div>
+                          <div className="text-xs font-medium">{e.type === "debt" ? "دين جديد" : "تسديد"} {e.notes ? "· " + e.notes : ""}</div>
+                          <div className="text-[10px] text-slate-400">{e.date}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold num ${e.type === "debt" ? "text-red-500" : "text-emerald-600"}`}>{e.type === "debt" ? "+" : "-"}{fmt(e.amount)}</span>
+                          <button onClick={() => onDeleteEntry(s.id, e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {form && <SupplierModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
+      {entryFor && (
+        <SupplierEntryModal supplier={entryFor.supplier} type={entryFor.type} currency={data.settings.currency}
+          onClose={() => setEntryFor(null)} onSave={(entry) => { onAddEntry(entryFor.supplier.id, entry); setEntryFor(null); }} />
+      )}
+      {confirmDel && (
+        <ConfirmModal title="حذف المندوب" message={`سيتم حذف "${confirmDel.name}" وكل سجل ديونه وتسديداته. متابعة؟`}
+          onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
+      )}
+    </div>
+  );
+}
+
+function SupplierModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [phone, setPhone] = useState(initial.phone || "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [err, setErr] = useState("");
+  function save() {
+    if (!name.trim()) return setErr("اسم المندوب مطلوب");
+    onSave({ id: initial.id, name: name.trim(), phone: phone.trim(), notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={initial.id ? "تعديل مندوب" : "إضافة مندوب"}>
+      <Field label="اسم المندوب / المحل"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="رقم الجوال (اختياري)"><input value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
+  );
+}
+
+function SupplierEntryModal({ supplier, type, currency, onClose, onSave }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState("");
+  const isPayment = type === "payment";
+  function save() {
+    const v = Number(amount);
+    if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+    onSave({ type, amount: v, date, notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={`${isPayment ? "تسديد دفعة لـ" : "دين جديد على"} ${supplier.name}`}>
+      <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="ملاحظات (مثل: أسماء القطع)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {isPayment && <div className="text-[11px] text-slate-400 mb-2">بيتسجل هذا المبلغ تلقائيًا كمصروف في دفتر العمليات.</div>}
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className={`w-full text-white rounded-xl py-3 text-sm font-semibold ${isPayment ? "bg-emerald-500" : "bg-red-500"}`}>{isPayment ? "حفظ التسديد" : "حفظ الدين"}</button>
+    </Sheet>
+  );
+}
+
+function DailyClosing({ data, totals, onSaveClosing, exportDayCSV }) {
+  const [date, setDate] = useState(todayISO());
+  const dayTx = useMemo(() => data.transactions.filter(t => t.date === date), [data.transactions, date]);
+  const income = dayTx.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = dayTx.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const withdraw = dayTx.filter(t => t.type === "withdraw").reduce((s, t) => s + t.amount, 0);
+  const net = income - expense;
+
+  const openingBalance = useMemo(() => {
+    let bal = Number(data.settings.initialBalance || 0);
+    for (const t of data.transactions) {
+      if (t.date >= date) continue;
+      if (t.type === "income") bal += t.amount;
+      else if (t.type === "expense") bal -= t.amount;
+      else if (t.type === "withdraw") bal -= t.amount;
+    }
+    return bal;
+  }, [data.transactions, data.settings.initialBalance, date]);
+  const closingBalance = openingBalance + income - expense - withdraw;
+
+  const existing = data.closings.find(c => c.date === date);
+  const [copied, setCopied] = useState(false);
+
+  function save() {
+    onSaveClosing({ date, openingBalance, income, expense, withdraw, net, closingBalance, txCount: dayTx.length });
+  }
+
+  function copyText() {
+    const text = buildClosingText(data.settings.shopName, date, openingBalance, closingBalance, income, expense, withdraw, net, dayTx, data.settings.currency);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+    } else {
+      window.prompt("انسخ النص التالي يدويًا:", text);
+    }
+  }
+
+  function printAsDocument() {
+    printClosing(data.settings.shopName, date, openingBalance, closingBalance, income, expense, withdraw, net, dayTx, data.settings.currency);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">التقفيلة اليومية</div>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="bg-white border border-slate-200 rounded-xl text-sm px-3 py-1.5" />
+      </div>
+
+      {existing && <div className="text-[11px] bg-emerald-50 text-emerald-600 rounded-xl px-3 py-2">تم حفظ تقفيلة هذا اليوم مسبقًا، آخر تحديث محفوظ أدناه</div>}
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
+        <div><div className="text-xs text-slate-400 mb-1">رصيد بداية اليوم</div><div className="text-base font-bold num">{fmt(openingBalance)} {data.settings.currency}</div></div>
+        <span className="text-slate-300">→</span>
+        <div className="text-left"><div className="text-xs text-slate-400 mb-1">رصيد نهاية اليوم</div><div className="text-base font-bold num">{fmt(closingBalance)} {data.settings.currency}</div></div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard icon="📈" color="#0f9d6e" label="إيرادات اليوم" value={income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label="مصروفات اليوم" value={expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات اليوم" value={withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح اليوم" value={net} currency={data.settings.currency} />
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="flex items-center justify-between mb-3">
+          <div className="font-semibold text-sm">عمليات اليوم ({dayTx.length})</div>
+          <button onClick={() => exportDayCSV(date)} className="text-[11px] text-slate-500 flex items-center gap-1">⬇ تصدير</button>
+        </div>
+        {dayTx.length === 0 ? (
+          <div className="text-center text-slate-400 text-sm py-6">لا توجد عمليات مسجلة بهذا اليوم</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {dayTx.map(t => <TxRow key={t.id} t={t} onClick={() => {}} />)}
+          </div>
+        )}
+      </div>
+
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">{existing ? "تحديث تقفيلة اليوم" : "حفظ تقفيلة اليوم"}</button>
+
+      <div className="flex gap-2">
+        <button onClick={copyText} className="flex-1 bg-white border border-slate-200 rounded-xl py-2.5 text-xs font-semibold text-slate-600 flex items-center justify-center gap-1">
+          {copied ? "✓ تم النسخ" : "📋 نسخ كنص"}
+        </button>
+        <button onClick={printAsDocument} className="flex-1 bg-white border border-slate-200 rounded-xl py-2.5 text-xs font-semibold text-slate-600 flex items-center justify-center gap-1">🖨 تنزيل كمستند</button>
+      </div>
+
+      {data.closings.length > 0 && (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+          <div className="font-semibold text-sm mb-2">آخر التقفيلات المحفوظة</div>
+          <div className="divide-y divide-slate-100">
+            {data.closings.slice(0, 8).map(c => (
+              <button key={c.id} onClick={() => setDate(c.date)} className="w-full flex items-center justify-between py-2 text-sm">
+                <span className="text-slate-600">{c.date}</span>
+                <span className={`font-bold num ${c.net >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt(c.net)} {data.settings.currency}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory }) {
+  const [shopName, setShopName] = useState(data.settings.shopName);
+  const [currency, setCurrency] = useState(data.settings.currency);
+  const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
+  const [newIncomeCat, setNewIncomeCat] = useState("");
+  const [newExpenseCat, setNewExpenseCat] = useState("");
+
+  return (
+    <div className="space-y-4">
+      <div className="font-bold text-lg">الإعدادات</div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3">
+        <Field label="اسم المحل"><input value={shopName} onChange={e => setShopName(e.target.value)} onBlur={() => onUpdateSettings({ shopName })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <Field label="العملة"><input value={currency} onChange={e => setCurrency(e.target.value)} onBlur={() => onUpdateSettings({ currency })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <Field label="الرصيد الابتدائي"><input type="number" value={initialBalance} onChange={e => setInitialBalance(e.target.value)} onBlur={() => onUpdateSettings({ initialBalance: Number(initialBalance || 0) })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-2">تصنيفات الإيرادات</div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {data.categories.income.map(c => <span key={c} className="flex items-center gap-1 bg-emerald-50 text-emerald-700 text-xs px-2.5 py-1 rounded-full">{c} <button onClick={() => onRemoveCategory("income", c)}>✕</button></span>)}
+        </div>
+        <div className="flex gap-2">
+          <input value={newIncomeCat} onChange={e => setNewIncomeCat(e.target.value)} placeholder="تصنيف جديد" className="flex-1 bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none" />
+          <button onClick={() => { onAddCategory("income", newIncomeCat); setNewIncomeCat(""); }} className="bg-slate-800 text-white rounded-xl px-3 text-sm">إضافة</button>
+        </div>
+      </div>
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-2">تصنيفات المصروفات</div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {data.categories.expense.map(c => <span key={c} className="flex items-center gap-1 bg-red-50 text-red-600 text-xs px-2.5 py-1 rounded-full">{c} <button onClick={() => onRemoveCategory("expense", c)}>✕</button></span>)}
+        </div>
+        <div className="flex gap-2">
+          <input value={newExpenseCat} onChange={e => setNewExpenseCat(e.target.value)} placeholder="تصنيف جديد" className="flex-1 bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none" />
+          <button onClick={() => { onAddCategory("expense", newExpenseCat); setNewExpenseCat(""); }} className="bg-slate-800 text-white rounded-xl px-3 text-sm">إضافة</button>
+        </div>
+      </div>
+      <div className="text-center text-[11px] text-slate-400 pb-2">البيانات محفوظة على هذا الجهاز وهذا المتصفح فقط، افتح الملف نفسه دائمًا للوصول لها</div>
+    </div>
+  );
+}
+
+function TxModal({ type, setType, categories, initial, currency, onClose, onSave }) {
+  const isEdit = !!initial;
+  const [title, setTitle] = useState(initial?.title || "");
+  const [person, setPerson] = useState(initial?.person || "");
+  const [category, setCategory] = useState(initial?.category || "");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [date, setDate] = useState(initial?.date || todayISO());
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [reason, setReason] = useState(initial?.notes || "");
+  const [err, setErr] = useState("");
+  const cats = type === "income" ? categories.income : type === "expense" ? categories.expense : [];
+
+  function save() {
+    const amt = Number(amount);
+    if (!amt || amt <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+    if (type === "withdraw") {
+      if (!person.trim()) return setErr("اسم الشخص مطلوب");
+      onSave({ id: initial?.id, type, person: person.trim(), amount: amt, date, notes: reason.trim() });
+    } else {
+      if (!title.trim()) return setErr("اسم العملية مطلوب");
+      onSave({ id: initial?.id, type, title: title.trim(), category, amount: amt, date, notes: notes.trim() });
+    }
+  }
+
+  return (
+    <Sheet onClose={onClose} title={isEdit ? "تعديل عملية" : "إضافة عملية"}>
+      {!isEdit && (
+        <div className="flex gap-2 mb-3">
+          {["income", "expense", "withdraw"].map(t => (
+            <button key={t} onClick={() => setType(t)} className="flex-1 text-xs py-2 rounded-xl border font-medium"
+              style={type === t ? { background: TYPE_META[t].color, borderColor: TYPE_META[t].color, color: "white" } : { borderColor: "#e2e8f0", color: "#64748b" }}>
+              {TYPE_META[t].label}
+            </button>
+          ))}
+        </div>
+      )}
+      {type === "withdraw" ? (
+        <Field label="اسم الشخص"><input value={person} onChange={e => setPerson(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      ) : (
+        <>
+          <Field label="اسم العملية"><input value={title} onChange={e => setTitle(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+          <Field label="التصنيف">
+            <select value={category} onChange={e => setCategory(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none">
+              <option value="">بدون تصنيف</option>
+              {cats.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+        </>
+      )}
+      <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label={type === "withdraw" ? "السبب / ملاحظات" : "ملاحظات"}>
+        <textarea value={type === "withdraw" ? reason : notes} onChange={e => type === "withdraw" ? setReason(e.target.value) : setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" />
+      </Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full text-white rounded-xl py-3 text-sm font-semibold" style={{ background: TYPE_META[type].color }}>{isEdit ? "حفظ التعديل" : "إضافة"}</button>
+    </Sheet>
+  );
+}
+
+function Field({ label, children }) {
+  return (<div className="mb-3"><div className="text-xs text-slate-400 mb-1.5">{label}</div>{children}</div>);
+}
+
+function Sheet({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white w-full max-w-[480px] rounded-t-3xl p-5 max-h-[88vh] overflow-y-auto" onClick={e => e.stopPropagation()} dir="rtl">
+        <div className="flex items-center justify-between mb-4">
+          <div className="font-bold text-base">{title}</div>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmModal({ title, message, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6" onClick={onCancel}>
+      <div className="bg-white rounded-2xl p-5 w-full max-w-[340px]" onClick={e => e.stopPropagation()} dir="rtl">
+        <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center mb-3 text-red-500">⚠</div>
+        <div className="font-bold text-sm mb-1.5">{title}</div>
+        <div className="text-xs text-slate-500 mb-4">{message}</div>
+        <div className="flex gap-2">
+          <button onClick={onCancel} className="flex-1 border border-slate-200 rounded-xl py-2.5 text-sm text-slate-600">إلغاء</button>
+          <button onClick={onConfirm} className="flex-1 bg-red-500 text-white rounded-xl py-2.5 text-sm font-semibold">حذف</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickAddBar({ onPick }) {
+  return (
+    <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: 78 }}>
+      <div className="flex gap-2 pointer-events-auto">
+        {["income", "expense", "withdraw"].map(t => {
+          const meta = TYPE_META[t];
+          return (
+            <button key={t} onClick={() => onPick(t)} className="flex items-center gap-1.5 text-white text-xs font-semibold px-3.5 py-2.5 rounded-full shadow-lg" style={{ background: meta.color }}>
+              <span>{meta.icon}</span> {meta.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  const primary = [
+    { id: "dashboard", label: "الرئيسية", icon: "🏠" },
+    { id: "ledger", label: "العمليات", icon: "📋" },
+    { id: "reports", label: "التقارير", icon: "📊" },
+    { id: "more", label: "المزيد", icon: "☰" },
+  ];
+  const secondaryIds = ["devices", "obligations", "suppliers", "closing", "partners", "settings"];
+  const activeId = secondaryIds.includes(tab) ? "more" : tab;
+  return (
+    <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-slate-100 flex items-center justify-around py-2 rounded-t-2xl">
+      {primary.map(it => {
+        const active = activeId === it.id;
+        return (
+          <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-0.5 px-2 py-1">
+            <span className="text-base" style={{ opacity: active ? 1 : 0.55 }}>{it.icon}</span>
+            <span className={`text-[10px] ${active ? "text-[#12213B] font-semibold" : "text-slate-400"}`}>{it.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MoreMenu({ setTab }) {
+  const items = [
+    { id: "devices", label: "الأجهزة", icon: "📱", desc: "شراء وبيع أجهزة مستعملة وجديدة" },
+    { id: "obligations", label: "الالتزامات الثابتة", icon: "🎯", desc: "إيجار، رواتب، والتزامات شهرية" },
+    { id: "suppliers", label: "المناديب والموردين", icon: "🚚", desc: "متابعة ديون مناديب قطع الغيار" },
+    { id: "closing", label: "التقفيلة اليومية", icon: "🧾", desc: "ملخص كامل لعمليات اليوم" },
+    { id: "partners", label: "الشركاء", icon: "👥", desc: "الشركاء ونسب تقسيم الأرباح" },
+    { id: "settings", label: "الإعدادات", icon: "⚙", desc: "اسم المحل، العملة، التصنيفات" },
+  ];
+  return (
+    <div className="space-y-3">
+      <div className="font-bold text-lg">المزيد</div>
+      <div className="space-y-2">
+        {items.map(it => (
+          <button key={it.id} onClick={() => setTab(it.id)} className="w-full bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center gap-3 text-right">
+            <span className="text-2xl">{it.icon}</span>
+            <div className="flex-1">
+              <div className="font-semibold text-sm">{it.label}</div>
+              <div className="text-[11px] text-slate-400">{it.desc}</div>
+            </div>
+            <span className="text-slate-300">‹</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<script>
+(function () {
+  var src = document.getElementById("app-source").textContent;
+  var result = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] });
+  var s = document.createElement("script");
+  s.text = result.code;
+  document.body.appendChild(s);
+})();
+</script>
+</body>
+</html>
