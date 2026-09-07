@@ -225,7 +225,7 @@ function loadData() {
       closings: parsed.closings || [],
       inventory: parsed.inventory || [],
       purchaseInvoices: parsed.purchaseInvoices || [],
-      employees: parsed.employees || [],
+      employees: (parsed.employees || []).map(e => ({ attendance: [], ...e })),
       safeLog: parsed.safeLog || [],
     };
   } catch (e) { return DEFAULT_DATA; }
@@ -300,17 +300,20 @@ function App() {
   function upsertTransaction(payload) {
     let networkLog = data.networkLog;
     let cashLog = data.cashLog;
-    const source = payload.paymentSource || "none"; // 'none' | 'cash' | 'network'
+    let safeLog = data.safeLog;
+    const source = payload.paymentSource || "none"; // 'none' | 'cash' | 'network' | 'safe'
 
     if (payload.id) {
       const old = data.transactions.find(t => t.id === payload.id);
       const updated = { ...old, ...payload };
       const oldNetId = old.linkedNetworkEntryId || null;
       const oldCashId = old.linkedCashEntryId || null;
+      const oldSafeId = old.linkedSafeEntryId || null;
 
       // remove stale links that no longer match the chosen source
       if (oldNetId && source !== "network") { networkLog = networkLog.filter(e => e.id !== oldNetId); updated.linkedNetworkEntryId = null; }
       if (oldCashId && source !== "cash") { cashLog = cashLog.filter(e => e.id !== oldCashId); updated.linkedCashEntryId = null; }
+      if (oldSafeId && source !== "safe") { safeLog = safeLog.filter(e => e.id !== oldSafeId); updated.linkedSafeEntryId = null; }
 
       if (source === "network") {
         if (oldNetId) {
@@ -328,8 +331,16 @@ function App() {
           cashLog = [{ id: entryId, date: updated.date, type: "deduct", amount: Number(updated.amount), notes: `مصروف: ${updated.title}`, kind: "expense", linkedTxId: updated.id, createdAt: new Date().toISOString() }, ...cashLog];
           updated.linkedCashEntryId = entryId;
         }
+      } else if (source === "safe") {
+        if (oldSafeId) {
+          safeLog = safeLog.map(e => e.id === oldSafeId ? { ...e, amount: Number(updated.amount), date: updated.date, notes: `مصروف: ${updated.title}`, kind: "expense" } : e);
+        } else {
+          const entryId = uid();
+          safeLog = [{ id: entryId, date: updated.date, type: "deduct", amount: Number(updated.amount), notes: `مصروف: ${updated.title}`, kind: "expense", linkedTxId: updated.id, createdAt: new Date().toISOString() }, ...safeLog];
+          updated.linkedSafeEntryId = entryId;
+        }
       }
-      persist({ ...data, transactions: data.transactions.map(t => t.id === payload.id ? updated : t), networkLog, cashLog });
+      persist({ ...data, transactions: data.transactions.map(t => t.id === payload.id ? updated : t), networkLog, cashLog, safeLog });
       showToast("تم تحديث العملية");
     } else {
       const item = { ...payload, id: uid(), createdAt: new Date().toISOString() };
@@ -341,8 +352,12 @@ function App() {
         const entryId = uid();
         cashLog = [{ id: entryId, date: item.date, type: "deduct", amount: Number(item.amount), notes: `مصروف: ${item.title}`, kind: "expense", linkedTxId: item.id, createdAt: new Date().toISOString() }, ...cashLog];
         item.linkedCashEntryId = entryId;
+      } else if (source === "safe") {
+        const entryId = uid();
+        safeLog = [{ id: entryId, date: item.date, type: "deduct", amount: Number(item.amount), notes: `مصروف: ${item.title}`, kind: "expense", linkedTxId: item.id, createdAt: new Date().toISOString() }, ...safeLog];
+        item.linkedSafeEntryId = entryId;
       }
-      persist({ ...data, transactions: [item, ...data.transactions], networkLog, cashLog });
+      persist({ ...data, transactions: [item, ...data.transactions], networkLog, cashLog, safeLog });
       showToast("تمت إضافة العملية");
     }
     setAddOpen(false); setEditItem(null);
@@ -352,7 +367,8 @@ function App() {
     const t = data.transactions.find(x => x.id === id);
     const networkLog = t?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== t.linkedNetworkEntryId) : data.networkLog;
     const cashLog = t?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== t.linkedCashEntryId) : data.cashLog;
-    persist({ ...data, transactions: data.transactions.filter(t => t.id !== id), networkLog, cashLog });
+    const safeLog = t?.linkedSafeEntryId ? data.safeLog.filter(e => e.id !== t.linkedSafeEntryId) : data.safeLog;
+    persist({ ...data, transactions: data.transactions.filter(t => t.id !== id), networkLog, cashLog, safeLog });
     setConfirmDelete(null);
     showToast("تم الحذف");
   }
@@ -477,24 +493,101 @@ function App() {
     showToast("تم تحويل المبلغ للخزنة");
   }
 
-  function withdrawFromSafe(payload) {
-    const safeEntry = { id: uid(), date: payload.date, type: "deduct", amount: Number(payload.amount), source: null, notes: payload.notes || "", createdAt: new Date().toISOString() };
-    persist({ ...data, safeLog: [safeEntry, ...data.safeLog] });
-    showToast("تم تسجيل السحب من الخزنة");
+  function addSafeDeduction(payload) {
+    const amount = Number(payload.amount);
+    const date = payload.date;
+    let transactions = [...data.transactions];
+    let suppliers = [...data.suppliers];
+    let employees = [...data.employees];
+    let cashLog = data.cashLog;
+    const safeEntryId = uid();
+    let linkedTxId = null;
+    let linkedCashEntryId = null;
+    let kind = "manual";
+    let autoLabel = "";
+
+    if (payload.purpose === "expense") {
+      kind = "expense";
+      autoLabel = payload.title ? `مصروف: ${payload.title}` : "مصروف";
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "expense", title: payload.title || "مصروف من الخزنة", category: payload.category || "",
+        amount, date, notes: payload.notes || "", linkedSafeEntryId: safeEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else if (payload.purpose === "supplier" && payload.supplierId) {
+      const supplier = suppliers.find(s => s.id === payload.supplierId);
+      if (supplier) {
+        kind = "supplier";
+        autoLabel = `تسديد مندوب: ${supplier.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        suppliers = suppliers.map(s => s.id === payload.supplierId ? {
+          ...s, entries: [{ id: uid(), type: "payment", amount, date, notes: payload.notes || "", linkedTxId, linkedSafeEntryId: safeEntryId, createdAt: new Date().toISOString() }, ...s.entries],
+        } : s);
+      }
+    } else if (payload.purpose === "employee" && payload.employeeId) {
+      const emp = employees.find(e => e.id === payload.employeeId);
+      if (emp) {
+        kind = "employee";
+        autoLabel = `راتب: ${emp.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        employees = employees.map(e => e.id === payload.employeeId ? {
+          ...e, entries: [{ id: uid(), amount, date, notes: payload.notes || "", linkedTxId, linkedSafeEntryId: safeEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+        } : e);
+      }
+    } else if (payload.purpose === "withdraw") {
+      kind = "withdraw";
+      const partnerName = payload.partnerId ? (data.partners.find(p => p.id === payload.partnerId)?.name) : null;
+      autoLabel = `سحب: ${partnerName || payload.person || ""}`;
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "withdraw", person: partnerName || payload.person || "", partnerId: payload.partnerId || null,
+        amount, date, notes: payload.notes || "", linkedSafeEntryId: safeEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else {
+      // بدون ربط: يتحول تلقائيًا لكاش (عشان ما تضيع الفلوس من الحسابات)
+      kind = "manual";
+      autoLabel = "سحب من الخزنة";
+      const cashEntryId = uid();
+      cashLog = [{ id: cashEntryId, date, type: "add", kind: "safe", amount, notes: "سحب من الخزنة" + (payload.notes ? " - " + payload.notes : ""), linkedTxId: null, createdAt: new Date().toISOString() }, ...cashLog];
+      linkedCashEntryId = cashEntryId;
+    }
+
+    const finalNotes = [autoLabel, payload.notes].filter(Boolean).join(" · ");
+    const safeEntry = { id: safeEntryId, date, type: "deduct", kind, amount, source: linkedCashEntryId ? "cash" : null, notes: finalNotes, linkedTxId, linkedCashEntryId, createdAt: new Date().toISOString() };
+    persist({ ...data, transactions, suppliers, employees, cashLog, safeLog: [safeEntry, ...data.safeLog] });
+    showToast("تم تسجيل الخصم من الخزنة");
   }
 
   function deleteSafeEntry(id) {
     const entry = data.safeLog.find(e => e.id === id);
     let networkLog = data.networkLog;
     let cashLog = data.cashLog;
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    let employees = data.employees;
     if (entry && entry.type === "add") {
       if (entry.source === "cash") {
         cashLog = [{ id: uid(), date: todayISO(), type: "add", kind: "safe", amount: entry.amount, notes: "إلغاء تحويل من الخزنة", linkedTxId: null, createdAt: new Date().toISOString() }, ...cashLog];
       } else if (entry.source === "network") {
         networkLog = [{ id: uid(), date: todayISO(), type: "add", amount: entry.amount, notes: "إلغاء تحويل من الخزنة", kind: "safe", linkedTxId: null, createdAt: new Date().toISOString() }, ...networkLog];
       }
+    } else if (entry && entry.type === "deduct") {
+      if (entry.linkedCashEntryId) cashLog = cashLog.filter(e => e.id !== entry.linkedCashEntryId);
+      if (entry.linkedTxId) {
+        transactions = transactions.filter(t => t.id !== entry.linkedTxId);
+        suppliers = suppliers.map(s => ({ ...s, entries: s.entries.filter(e2 => e2.linkedSafeEntryId !== id) }));
+        employees = employees.map(e => ({ ...e, entries: e.entries.filter(e2 => e2.linkedSafeEntryId !== id) }));
+      }
     }
-    persist({ ...data, networkLog, cashLog, safeLog: data.safeLog.filter(e => e.id !== id) });
+    persist({ ...data, networkLog, cashLog, transactions, suppliers, employees, safeLog: data.safeLog.filter(e => e.id !== id) });
   }
 
   function addNetworkDeduction(payload) {
@@ -569,6 +662,7 @@ function App() {
     let employees = [...data.employees];
     let networkLog = [...data.networkLog];
     let cashLog = [...data.cashLog];
+    let safeLog = [...data.safeLog];
     let settings = { ...data.settings };
 
     if (Number(payload.salesAmount) > 0) {
@@ -581,18 +675,21 @@ function App() {
     (payload.expenses || []).forEach(exp => {
       if (!(Number(exp.amount) > 0)) return;
       const txId = uid();
-      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      let linkedNetworkEntryId = null, linkedCashEntryId = null, linkedSafeEntryId = null;
       if (exp.paymentSource === "network") {
         linkedNetworkEntryId = uid();
         networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
       } else if (exp.paymentSource === "cash") {
         linkedCashEntryId = uid();
         cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      } else if (exp.paymentSource === "safe") {
+        linkedSafeEntryId = uid();
+        safeLog = [{ id: linkedSafeEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
       }
       transactions = [{
         id: txId, type: "expense", title: exp.title || `مصروف يوم ${payload.date}`, category: exp.category || "",
         amount: Number(exp.amount), date: payload.date, notes: exp.notes || "",
-        linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString(),
+        linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString(),
       }, ...transactions];
     });
 
@@ -605,16 +702,19 @@ function App() {
         id: txId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
         amount: Number(sp.amount), date: payload.date, notes: "يومية سريعة", createdAt: new Date().toISOString(),
       }, ...transactions];
-      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      let linkedNetworkEntryId = null, linkedCashEntryId = null, linkedSafeEntryId = null;
       if (sp.paymentSource === "network") {
         linkedNetworkEntryId = uid();
         networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(sp.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
       } else if (sp.paymentSource === "cash") {
         linkedCashEntryId = uid();
         cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(sp.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      } else if (sp.paymentSource === "safe") {
+        linkedSafeEntryId = uid();
+        safeLog = [{ id: linkedSafeEntryId, date: payload.date, type: "deduct", amount: Number(sp.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
       }
       suppliers = suppliers.map(s => s.id === sp.supplierId ? {
-        ...s, entries: [{ id: uid(), type: "payment", amount: Number(sp.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...s.entries],
+        ...s, entries: [{ id: uid(), type: "payment", amount: Number(sp.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() }, ...s.entries],
       } : s);
     });
 
@@ -627,16 +727,19 @@ function App() {
         id: txId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
         amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", createdAt: new Date().toISOString(),
       }, ...transactions];
-      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      let linkedNetworkEntryId = null, linkedCashEntryId = null, linkedSafeEntryId = null;
       if (ep.paymentSource === "network") {
         linkedNetworkEntryId = uid();
         networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
       } else if (ep.paymentSource === "cash") {
         linkedCashEntryId = uid();
         cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      } else if (ep.paymentSource === "safe") {
+        linkedSafeEntryId = uid();
+        safeLog = [{ id: linkedSafeEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
       }
       employees = employees.map(e => e.id === ep.employeeId ? {
-        ...e, entries: [{ id: uid(), amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+        ...e, entries: [{ id: uid(), amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() }, ...e.entries],
       } : e);
     });
 
@@ -651,7 +754,7 @@ function App() {
       }
     }
 
-    persist({ ...data, transactions, suppliers, employees, networkLog, cashLog, settings });
+    persist({ ...data, transactions, suppliers, employees, networkLog, cashLog, safeLog, settings });
     showToast("تم حفظ يومية اليوم بكل تفاصيلها");
   }
 
@@ -882,7 +985,7 @@ function App() {
 
   function upsertEmployee(p) {
     if (p.id) persist({ ...data, employees: data.employees.map(x => x.id === p.id ? { ...x, ...p } : x) });
-    else persist({ ...data, employees: [...data.employees, { ...p, id: uid(), entries: [], createdAt: new Date().toISOString() }] });
+    else persist({ ...data, employees: [...data.employees, { ...p, id: uid(), entries: [], attendance: [], createdAt: new Date().toISOString() }] });
     showToast(p.id ? "تم تحديث بيانات الموظف" : "تمت إضافة الموظف");
   }
 
@@ -891,6 +994,34 @@ function App() {
     const linkedTxIds = (emp?.entries || []).map(e => e.linkedTxId).filter(Boolean);
     persist({ ...data, employees: data.employees.filter(e => e.id !== id), transactions: data.transactions.filter(t => !linkedTxIds.includes(t.id)) });
     showToast("تم حذف الموظف وسجل دفعاته");
+  }
+
+  function markAttendance(employeeId, payload) {
+    // payload: { date, status } - upsert: replace any existing entry for the same date
+    const emp = data.employees.find(e => e.id === employeeId);
+    if (!emp) return;
+    const attendance = emp.attendance || [];
+    const filtered = attendance.filter(a => a.date !== payload.date);
+    const newEntry = { id: uid(), date: payload.date, status: payload.status, notes: payload.notes || "", createdAt: new Date().toISOString() };
+    persist({ ...data, employees: data.employees.map(e => e.id === employeeId ? { ...e, attendance: [newEntry, ...filtered] } : e) });
+    showToast(payload.status === "present" ? "تم تسجيل الحضور" : "تم تسجيل الغياب");
+  }
+
+  function toggleTodayAttendance(employeeId) {
+    const emp = data.employees.find(e => e.id === employeeId);
+    if (!emp) return;
+    const today = todayISO();
+    const already = (emp.attendance || []).find(a => a.date === today && a.status === "present");
+    if (already) {
+      persist({ ...data, employees: data.employees.map(e => e.id === employeeId ? { ...e, attendance: e.attendance.filter(a => a.id !== already.id) } : e) });
+      showToast("تم إلغاء تسجيل حضور اليوم");
+    } else {
+      markAttendance(employeeId, { date: today, status: "present" });
+    }
+  }
+
+  function deleteAttendance(employeeId, attendanceId) {
+    persist({ ...data, employees: data.employees.map(e => e.id === employeeId ? { ...e, attendance: (e.attendance || []).filter(a => a.id !== attendanceId) } : e) });
   }
 
   function addEmployeePayment(employeeId, entry) {
@@ -903,18 +1034,23 @@ function App() {
     };
     let networkLog = data.networkLog;
     let cashLog = data.cashLog;
+    let safeLog = data.safeLog;
     let linkedNetworkEntryId = null;
     let linkedCashEntryId = null;
+    let linkedSafeEntryId = null;
     if (entry.paymentSource === "network") {
       linkedNetworkEntryId = uid();
       networkLog = [{ id: linkedNetworkEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
     } else if (entry.paymentSource === "cash") {
       linkedCashEntryId = uid();
       cashLog = [{ id: linkedCashEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+    } else if (entry.paymentSource === "safe") {
+      linkedSafeEntryId = uid();
+      safeLog = [{ id: linkedSafeEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
     }
-    const newEntry = { id: uid(), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() };
+    const newEntry = { id: uid(), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
     persist({
-      ...data, transactions: [tx, ...data.transactions], networkLog, cashLog,
+      ...data, transactions: [tx, ...data.transactions], networkLog, cashLog, safeLog,
       employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: [newEntry, ...e.entries] } : e),
     });
     showToast("تم تسجيل الدفعة كمصروف راتب");
@@ -926,8 +1062,9 @@ function App() {
     const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
     const networkLog = entry?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== entry.linkedNetworkEntryId) : data.networkLog;
     const cashLog = entry?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId) : data.cashLog;
+    const safeLog = entry?.linkedSafeEntryId ? data.safeLog.filter(e => e.id !== entry.linkedSafeEntryId) : data.safeLog;
     persist({
-      ...data, transactions, networkLog, cashLog,
+      ...data, transactions, networkLog, cashLog, safeLog,
       employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: e.entries.filter(x => x.id !== entryId) } : e),
     });
   }
@@ -950,9 +1087,11 @@ function App() {
     let linkedTxId = null;
     let linkedNetworkEntryId = null;
     let linkedCashEntryId = null;
+    let linkedSafeEntryId = null;
     let transactions = data.transactions;
     let networkLog = data.networkLog;
     let cashLog = data.cashLog;
+    let safeLog = data.safeLog;
     if (entry.type === "payment") {
       linkedTxId = uid();
       const tx = {
@@ -966,11 +1105,14 @@ function App() {
       } else if (entry.paymentSource === "cash") {
         linkedCashEntryId = uid();
         cashLog = [{ id: linkedCashEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId, createdAt: new Date().toISOString() }, ...cashLog];
+      } else if (entry.paymentSource === "safe") {
+        linkedSafeEntryId = uid();
+        safeLog = [{ id: linkedSafeEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId, createdAt: new Date().toISOString() }, ...safeLog];
       }
     }
-    const newEntry = { id: uid(), type: entry.type, amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() };
+    const newEntry = { id: uid(), type: entry.type, amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
     persist({
-      ...data, transactions, networkLog, cashLog,
+      ...data, transactions, networkLog, cashLog, safeLog,
       suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: [newEntry, ...s.entries] } : s),
     });
     showToast(entry.type === "payment" ? "تم تسجيل التسديد كمصروف" : "تمت إضافة الدين");
@@ -982,8 +1124,9 @@ function App() {
     const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
     const networkLog = entry?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== entry.linkedNetworkEntryId) : data.networkLog;
     const cashLog = entry?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId) : data.cashLog;
+    const safeLog = entry?.linkedSafeEntryId ? data.safeLog.filter(e => e.id !== entry.linkedSafeEntryId) : data.safeLog;
     persist({
-      ...data, transactions, networkLog, cashLog,
+      ...data, transactions, networkLog, cashLog, safeLog,
       suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: s.entries.filter(e => e.id !== entryId) } : s),
     });
   }
@@ -1085,7 +1228,8 @@ function App() {
           <PurchaseInvoices data={data} onCreate={createPurchaseInvoice} onDelete={deletePurchaseInvoice} onAddReturn={addInvoiceReturn} onDeleteReturn={deleteInvoiceReturn} />
         )}
         {tab === "employees" && (
-          <Employees data={data} onSave={upsertEmployee} onDelete={deleteEmployee} onAddPayment={addEmployeePayment} onDeletePayment={deleteEmployeePayment} />
+          <Employees data={data} onSave={upsertEmployee} onDelete={deleteEmployee} onAddPayment={addEmployeePayment} onDeletePayment={deleteEmployeePayment}
+            onToggleToday={toggleTodayAttendance} onMarkAttendance={markAttendance} onDeleteAttendance={deleteAttendance} />
         )}
         {tab === "closing" && (
           <DailyClosing data={data} totals={totals} onSaveClosing={saveClosing} exportDayCSV={exportDayCSV} />
@@ -1132,7 +1276,8 @@ function App() {
       {safeLogOpen && (
         <SafeLogModal log={data.safeLog} currency={data.settings.currency} total={safeTotal}
           cashTotal={cashTotal} networkTotal={networkTotal}
-          onClose={() => setSafeLogOpen(false)} onTransfer={transferToSafe} onWithdraw={withdrawFromSafe} onDelete={deleteSafeEntry} />
+          categories={data.categories} suppliers={data.suppliers} employees={data.employees} partners={data.partners}
+          onClose={() => setSafeLogOpen(false)} onTransfer={transferToSafe} onDeduct={addSafeDeduction} onDelete={deleteSafeEntry} />
       )}
 
       {toast && (
@@ -1302,21 +1447,37 @@ function LedgerLogModal({ title: modalTitle, log, currency, total, categories, s
   );
 }
 
-function SafeLogModal({ log, currency, total, cashTotal, networkTotal, onClose, onTransfer, onWithdraw, onDelete }) {
-  const [mode, setMode] = useState("in"); // in = تحويل للخزنة, out = سحب منها
+function SafeLogModal({ log, currency, total, cashTotal, networkTotal, categories, suppliers, employees, partners, onClose, onTransfer, onDeduct, onDelete }) {
+  const [mode, setMode] = useState("in"); // in = تحويل للخزنة, out = سحب/تسديد منها
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
   const [source, setSource] = useState("cash");
   const [notes, setNotes] = useState("");
+  const [purpose, setPurpose] = useState("none");
+  const [category, setCategory] = useState("");
+  const [title, setTitle] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+  const [partnerId, setPartnerId] = useState("");
+  const [person, setPerson] = useState("");
   const [err, setErr] = useState("");
+
+  function resetPurposeFields() { setPurpose("none"); setCategory(""); setTitle(""); setSupplierId(""); setEmployeeId(""); setPartnerId(""); setPerson(""); }
 
   function save() {
     const v = Number(amount);
     if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
     if (!date) return setErr("التاريخ مطلوب");
-    if (mode === "in") onTransfer({ amount: v, date, source, notes: notes.trim() });
-    else onWithdraw({ amount: v, date, notes: notes.trim() });
-    setAmount(""); setNotes(""); setErr("");
+    if (mode === "in") {
+      onTransfer({ amount: v, date, source, notes: notes.trim() });
+    } else {
+      if (purpose === "expense" && !title.trim()) return setErr("اسم المصروف مطلوب");
+      if (purpose === "supplier" && !supplierId) return setErr("اختر المندوب");
+      if (purpose === "employee" && !employeeId) return setErr("اختر الموظف");
+      if (purpose === "withdraw" && !partnerId && !person.trim()) return setErr("حدد اسم الشخص أو اختر شريك");
+      onDeduct({ purpose, amount: v, date, notes: notes.trim(), category, title: title.trim(), supplierId, employeeId, partnerId, person: person.trim() });
+    }
+    setAmount(""); setNotes(""); setErr(""); resetPurposeFields();
   }
 
   return (
@@ -1327,8 +1488,8 @@ function SafeLogModal({ log, currency, total, cashTotal, networkTotal, onClose, 
       </div>
 
       <div className="flex gap-2 mb-3">
-        <button onClick={() => setMode("in")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "in" ? "bg-emerald-500 text-white border-emerald-500" : "border-slate-200 text-slate-600"}`}>＋ تحويل للخزنة</button>
-        <button onClick={() => setMode("out")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "out" ? "bg-red-500 text-white border-red-500" : "border-slate-200 text-slate-600"}`}>− سحب من الخزنة</button>
+        <button onClick={() => { setMode("in"); resetPurposeFields(); }} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "in" ? "bg-emerald-500 text-white border-emerald-500" : "border-slate-200 text-slate-600"}`}>＋ تحويل للخزنة</button>
+        <button onClick={() => setMode("out")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "out" ? "bg-red-500 text-white border-red-500" : "border-slate-200 text-slate-600"}`}>− سحب / تسديد من الخزنة</button>
       </div>
 
       {mode === "in" && (
@@ -1341,12 +1502,59 @@ function SafeLogModal({ log, currency, total, cashTotal, networkTotal, onClose, 
         </div>
       )}
 
+      {mode === "out" && (
+        <div className="mb-2">
+          <div className="text-[11px] text-slate-400 mb-1">هذا السحب مقابل:</div>
+          <select value={purpose} onChange={e => setPurpose(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+            <option value="none">بدون ربط (يتحول تلقائيًا لكاش)</option>
+            <option value="expense">مصروف (يسجل بدفتر العمليات)</option>
+            {suppliers.length > 0 && <option value="supplier">تسديد لمندوب</option>}
+            {employees.length > 0 && <option value="employee">دفعة راتب موظف</option>}
+            <option value="withdraw">سحب شخصي</option>
+          </select>
+
+          {purpose === "expense" && (
+            <>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="اسم المصروف" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />
+              <select value={category} onChange={e => setCategory(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none mb-2">
+                <option value="">بدون تصنيف</option>
+                {categories.expense.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </>
+          )}
+          {purpose === "supplier" && (
+            <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+              <option value="">اختر مندوب</option>
+              {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          )}
+          {purpose === "employee" && (
+            <select value={employeeId} onChange={e => setEmployeeId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+              <option value="">اختر موظف</option>
+              {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+            </select>
+          )}
+          {purpose === "withdraw" && (
+            <>
+              {partners.length > 0 && (
+                <select value={partnerId} onChange={e => { setPartnerId(e.target.value); setPerson(""); }} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+                  <option value="">اختر شريك أو اكتب اسم بالأسفل</option>
+                  {partners.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              )}
+              {!partnerId && <input value={person} onChange={e => setPerson(e.target.value)} placeholder="اسم الشخص" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2 mb-2">
         <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder={`المبلغ (${currency})`} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" />
         <input type="date" value={date} onChange={e => setDate(e.target.value)} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
       </div>
       <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />
       {mode === "in" && <div className="text-[11px] text-slate-400 mb-2">بينخصم هذا المبلغ تلقائيًا من {source === "cash" ? "الكاش" : "سجل الشبكة"}.</div>}
+      {mode === "out" && purpose === "none" && <div className="text-[11px] text-slate-400 mb-2">بيتضاف هذا المبلغ تلقائيًا لسجل الكاش (يعتبر كاش بيدك).</div>}
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
       <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold mb-4">حفظ</button>
 
@@ -1355,21 +1563,24 @@ function SafeLogModal({ log, currency, total, cashTotal, networkTotal, onClose, 
         <div className="text-center text-slate-400 text-xs py-6">لا توجد قيود بعد</div>
       ) : (
         <div className="divide-y divide-slate-100">
-          {log.map(e => (
-            <div key={e.id} className="flex items-center justify-between py-2">
-              <div>
-                <div className="text-xs font-medium">
-                  {e.date}
-                  {e.type === "add" && e.source ? ` · من ${e.source === "cash" ? "الكاش" : "الشبكة"}` : ""}
-                  {e.notes ? " · " + e.notes : ""}
+          {log.map(e => {
+            const meta = e.type === "add" && e.source ? null : (LEDGER_KIND_META[e.kind] || LEDGER_KIND_META.manual);
+            return (
+              <div key={e.id} className="flex items-center justify-between py-2.5 gap-2">
+                {meta && <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs" style={{ background: meta.color + "1A" }}>{meta.icon}</div>}
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium truncate">
+                    {e.type === "add" && e.source ? `تحويل من ${e.source === "cash" ? "الكاش" : "الشبكة"}` : (e.notes || (meta ? meta.label : ""))}
+                  </div>
+                  <div className="text-[10px] text-slate-400">{e.date}{e.notes && e.type === "add" && e.source ? " · " + e.notes : ""}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`text-xs font-bold num ${e.type === "deduct" ? "text-red-500" : "text-emerald-600"}`}>{e.type === "deduct" ? "-" : "+"}{fmt(e.amount)}</span>
+                  <button onClick={() => onDelete(e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <span className={`text-xs font-bold num ${e.type === "deduct" ? "text-red-500" : "text-emerald-600"}`}>{e.type === "deduct" ? "-" : "+"}{fmt(e.amount)}</span>
-                <button onClick={() => onDelete(e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Sheet>
@@ -1480,10 +1691,11 @@ function QuickDailyModal({ data, onClose, onSave }) {
                 {expenses.length > 1 && <button onClick={() => removeExpenseRow(idx)} className="text-red-400 px-1">✕</button>}
               </div>
               <input value={exp.notes} onChange={e => updateExpense(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
-              <div className="flex gap-1">
-                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
-                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
-                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+              <div className="grid grid-cols-4 gap-1">
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "none" })} className={`text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "cash" })} className={`text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵</button>
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "network" })} className={`text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳</button>
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "safe" })} className={`text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>🔒</button>
               </div>
             </div>
           ))}
@@ -1505,10 +1717,11 @@ function QuickDailyModal({ data, onClose, onSave }) {
                   <input type="number" value={sp.amount} onChange={e => updateSupplier(idx, { amount: e.target.value })} placeholder={`المبلغ`} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
                   {supplierPayments.length > 1 && <button onClick={() => removeSupplierRow(idx)} className="text-red-400 px-1">✕</button>}
                 </div>
-                <div className="flex gap-1">
-                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
-                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
-                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+                <div className="grid grid-cols-4 gap-1">
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "none" })} className={`text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "cash" })} className={`text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵</button>
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "network" })} className={`text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳</button>
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "safe" })} className={`text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>🔒</button>
                 </div>
               </div>
             ))}
@@ -1531,10 +1744,11 @@ function QuickDailyModal({ data, onClose, onSave }) {
                   <input type="number" value={ep.amount} onChange={e => updateEmployee(idx, { amount: e.target.value })} placeholder="المبلغ" className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
                   {employeePayments.length > 1 && <button onClick={() => removeEmployeeRow(idx)} className="text-red-400 px-1">✕</button>}
                 </div>
-                <div className="flex gap-1">
-                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
-                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
-                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+                <div className="grid grid-cols-4 gap-1">
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "none" })} className={`text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "cash" })} className={`text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵</button>
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "network" })} className={`text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳</button>
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "safe" })} className={`text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>🔒</button>
                 </div>
               </div>
             ))}
@@ -2290,10 +2504,11 @@ function SupplierEntryModal({ supplier, type, currency, onClose, onSave }) {
         <>
           <div className="mb-2">
             <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري)</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
-              <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
-              <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setPaymentSource("none")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+              <button type="button" onClick={() => setPaymentSource("cash")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+              <button type="button" onClick={() => setPaymentSource("network")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+              <button type="button" onClick={() => setPaymentSource("safe")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>🔒 خزنة</button>
             </div>
           </div>
           <div className="text-[11px] text-slate-400 mb-2">بيتسجل هذا المبلغ تلقائيًا كمصروف في دفتر العمليات.</div>
@@ -2725,15 +2940,24 @@ function InvoiceModal({ data, onClose, onSave }) {
   );
 }
 
-function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment }) {
+function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onToggleToday, onMarkAttendance, onDeleteAttendance }) {
   const [form, setForm] = useState(null);
   const [payFor, setPayFor] = useState(null);
+  const [attendFor, setAttendFor] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [expandedAttendance, setExpandedAttendance] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
   const curMonth = todayISO().slice(0, 7);
+  const today = todayISO();
 
   function paidThisMonth(emp) {
     return emp.entries.filter(e => e.date.slice(0, 7) === curMonth).reduce((s, e) => s + e.amount, 0);
+  }
+  function attendanceThisMonth(emp) {
+    return (emp.attendance || []).filter(a => a.date.slice(0, 7) === curMonth && a.status === "present").length;
+  }
+  function absencesThisMonth(emp) {
+    return (emp.attendance || []).filter(a => a.date.slice(0, 7) === curMonth && a.status === "absent").length;
   }
 
   const totalRemaining = data.employees.reduce((s, e) => s + Math.max(0, Number(e.monthlySalary || 0) - paidThisMonth(e)), 0);
@@ -2765,6 +2989,11 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment }) {
             const remaining = salary - paid;
             const pct = salary > 0 ? Math.min(100, Math.round((paid / salary) * 100)) : 0;
             const open = expanded === emp.id;
+            const attOpen = expandedAttendance === emp.id;
+            const presentDays = attendanceThisMonth(emp);
+            const absentDays = absencesThisMonth(emp);
+            const attendedToday = (emp.attendance || []).some(a => a.date === today && a.status === "present");
+            const attendance = (emp.attendance || []).slice().sort((a, b) => b.date.localeCompare(a.date));
             return (
               <div key={emp.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
                 <div className="flex items-start justify-between mb-2">
@@ -2787,6 +3016,34 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment }) {
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
                   <span>{pct}%</span>
                   <span className={remaining < 0 ? "text-red-500 font-semibold" : ""}>{remaining >= 0 ? `باقي له ${fmt(remaining)} ${data.settings.currency}` : `أخذ زيادة ${fmt(-remaining)} ${data.settings.currency}`}</span>
+                </div>
+
+                <div className="bg-slate-50 rounded-xl p-2.5 mb-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] text-slate-500">📅 دوام هذا الشهر: <span className="font-bold num text-emerald-600">{presentDays}</span> يوم{absentDays > 0 ? <span> · غياب: <span className="font-bold num text-red-500">{absentDays}</span></span> : null}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => onToggleToday(emp.id)} className={`flex-1 text-xs py-2 rounded-xl font-semibold ${attendedToday ? "bg-emerald-500 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
+                      {attendedToday ? "✓ حضر اليوم" : "تسجيل حضور اليوم"}
+                    </button>
+                    <button onClick={() => setAttendFor(emp)} className="px-3 bg-white border border-slate-200 rounded-xl text-xs text-slate-500">📆</button>
+                  </div>
+                  <button onClick={() => setExpandedAttendance(attOpen ? null : emp.id)} className="text-[11px] text-slate-400 mt-2">{attOpen ? "إخفاء سجل الدوام ▲" : "عرض سجل الدوام ▼"}</button>
+                  {attOpen && (
+                    <div className="mt-2 divide-y divide-slate-200 bg-white rounded-lg">
+                      {attendance.length === 0 ? (
+                        <div className="text-center text-slate-400 text-xs py-3">لا يوجد سجل دوام بعد</div>
+                      ) : attendance.map(a => (
+                        <div key={a.id} className="flex items-center justify-between px-2 py-1.5">
+                          <span className="text-[11px]">{a.date}{a.notes ? " · " + a.notes : ""}</span>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full ${a.status === "present" ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-500"}`}>{a.status === "present" ? "حاضر" : "غائب"}</span>
+                            <button onClick={() => onDeleteAttendance(emp.id, a.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <button onClick={() => setPayFor(emp)} className="w-full bg-slate-800 text-white rounded-xl py-2 text-xs font-semibold mb-2">＋ تسجيل دفعة من الراتب</button>
@@ -2818,11 +3075,39 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment }) {
       {payFor && (
         <EmployeePaymentModal employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
       )}
+      {attendFor && (
+        <AttendanceModal employee={attendFor} onClose={() => setAttendFor(null)} onSave={(payload) => { onMarkAttendance(attendFor.id, payload); setAttendFor(null); }} />
+      )}
       {confirmDel && (
         <ConfirmModal title="حذف الموظف" message={`سيتم حذف "${confirmDel.name}" وكل سجل دفعاته من دفتر العمليات. متابعة؟`}
           onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
       )}
     </div>
+  );
+}
+
+function AttendanceModal({ employee, onClose, onSave }) {
+  const [date, setDate] = useState(todayISO());
+  const [status, setStatus] = useState("present");
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState("");
+  function save() {
+    if (!date) return setErr("التاريخ مطلوب");
+    onSave({ date, status, notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={`تسجيل دوام — ${employee.name}`}>
+      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="الحالة">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setStatus("present")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${status === "present" ? "bg-emerald-500 text-white border-emerald-500" : "border-slate-200 text-slate-600"}`}>✓ حاضر</button>
+          <button type="button" onClick={() => setStatus("absent")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${status === "absent" ? "bg-red-500 text-white border-red-500" : "border-slate-200 text-slate-600"}`}>✕ غائب</button>
+        </div>
+      </Field>
+      <Field label="ملاحظات (اختياري، مثل: إجازة مرضية)"><input value={notes} onChange={e => setNotes(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
   );
 }
 
@@ -2867,10 +3152,11 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
       <Field label="ملاحظات (اختياري)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
       <div className="mb-2">
         <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري)</div>
-        <div className="flex gap-2">
-          <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
-          <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
-          <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={() => setPaymentSource("none")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+          <button type="button" onClick={() => setPaymentSource("cash")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+          <button type="button" onClick={() => setPaymentSource("network")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+          <button type="button" onClick={() => setPaymentSource("safe")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>🔒 خزنة</button>
         </div>
       </div>
       <div className="text-[11px] text-slate-400 mb-2">بتتسجل هذي الدفعة تلقائيًا كمصروف (تصنيف: رواتب) بدفتر العمليات.</div>
@@ -2958,7 +3244,7 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
   const [date, setDate] = useState(initial?.date || todayISO());
   const [notes, setNotes] = useState(initial?.notes || "");
   const [reason, setReason] = useState(initial?.notes || "");
-  const [paymentSource, setPaymentSource] = useState(initial?.linkedCashEntryId ? "cash" : initial?.linkedNetworkEntryId ? "network" : "none");
+  const [paymentSource, setPaymentSource] = useState(initial?.linkedCashEntryId ? "cash" : initial?.linkedNetworkEntryId ? "network" : initial?.linkedSafeEntryId ? "safe" : "none");
   const [err, setErr] = useState("");
   const cats = type === "income" ? categories.income : type === "expense" ? categories.expense : [];
 
@@ -3021,10 +3307,11 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
       {type === "expense" && (
         <div className="mb-3">
           <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري، يخصم تلقائيًا من السجل المناسب)</div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
-            <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
-            <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setPaymentSource("none")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+            <button type="button" onClick={() => setPaymentSource("cash")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+            <button type="button" onClick={() => setPaymentSource("network")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+            <button type="button" onClick={() => setPaymentSource("safe")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "safe" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>🔒 خزنة</button>
           </div>
         </div>
       )}
