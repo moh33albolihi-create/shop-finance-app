@@ -27,9 +27,11 @@ const STORAGE_KEY = "shop-finance-data-v1";
 const AR_MONTHS = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
 
 const DEFAULT_DATA = {
-  settings: { shopName: "محل الصيانة", currency: "ريال", initialBalance: 0, cashAmount: 0, networkAmount: 0 },
+  settings: { shopName: "محل الصيانة", currency: "ريال", initialBalance: 0 },
+  cashLog: [], // {id,date,type:'add'|'deduct',kind,amount,notes,linkedTxId,createdAt}
+  networkLog: [], // {id,date,type:'add'|'deduct',kind,amount,notes,linkedTxId,createdAt}
   categories: {
-    income: ["صيانة", "بيع قطعة", "بيع جهاز", "أخرى"],
+    income: ["صيانة", "بيع قطعة", "بيع جهاز", "مرتجع مشتريات", "أخرى"],
     expense: ["إيجار", "قطع غيار", "رواتب", "كهرباء", "مشتريات", "أدوات", "تسويق", "شراء أجهزة", "تسديد مناديب", "أخرى"],
   },
   partners: [],
@@ -38,6 +40,10 @@ const DEFAULT_DATA = {
   devices: [],
   suppliers: [], // {id,name,phone,notes,entries:[{id,type:'debt'|'payment',amount,date,notes,linkedTxId,createdAt}],createdAt}
   closings: [], // {id,date,openingBalance,income,expense,withdraw,net,closingBalance,notes,closedAt}
+  inventory: [], // {id,name,category,quantity,unitCost,unitPrice,minQty,notes,createdAt}
+  purchaseInvoices: [], // {id,invoiceNo,supplierId,supplierName,date,items:[{name,qty,unitCost,lineTotal}],total,paymentType:'cash'|'credit',linkedTxId,linkedEntryId,notes,createdAt}
+  employees: [], // {id,name,phone,monthlySalary,notes,entries:[{id,amount,date,notes,linkedTxId,createdAt}],createdAt}
+  safeLog: [], // {id,date,type:'add'|'deduct',amount,source:'cash'|'network'|null,notes,createdAt}
 };
 
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -52,6 +58,53 @@ function downloadFile(filename, content, mime = "text/csv;charset=utf-8;") {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function buildInvoiceText(shopName, invoice, currency) {
+  const lines = [];
+  lines.push(`🧾 فاتورة مشتريات رقم ${invoice.invoiceNo} — ${shopName}`);
+  lines.push(`التاريخ: ${invoice.date}`);
+  if (invoice.supplierName) lines.push(`المورد: ${invoice.supplierName}`);
+  lines.push("");
+  lines.push("الأصناف:");
+  invoice.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} — الكمية: ${it.qty} × ${fmt(it.unitCost)} = ${fmt(it.lineTotal)} ${currency}`));
+  lines.push("");
+  lines.push(`الإجمالي: ${fmt(invoice.total)} ${currency}`);
+  lines.push(`طريقة الدفع: ${invoice.paymentType === "cash" ? "نقدي (مسجل كمصروف)" : "على الحساب (مسجل كدين على المورد)"}`);
+  if (invoice.notes) lines.push(`ملاحظات: ${invoice.notes}`);
+  return lines.join("\n");
+}
+
+function printInvoice(shopName, invoice, currency) {
+  const rows = invoice.items.map((it, i) => `<tr><td>${i + 1}</td><td>${it.name}</td><td>${it.qty}</td><td>${fmt(it.unitCost)}</td><td>${fmt(it.lineTotal)}</td></tr>`).join("");
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>فاتورة ${invoice.invoiceNo}</title>
+  <style>
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#1e293b;}
+    h1{font-size:20px; margin-bottom:4px;}
+    .sub{color:#64748b; font-size:13px; margin-bottom:20px;}
+    table{width:100%; border-collapse:collapse; margin-top:10px;}
+    th,td{border:1px solid #e2e8f0; padding:8px; text-align:right; font-size:13px;}
+    th{background:#f8fafc;}
+    .total{margin-top:16px; font-size:16px; font-weight:bold; text-align:left;}
+    @media print { button{display:none;} }
+  </style></head>
+  <body>
+    <h1>فاتورة مشتريات رقم ${invoice.invoiceNo}</h1>
+    <div class="sub">${shopName} — ${invoice.date}${invoice.supplierName ? " — المورد: " + invoice.supplierName : ""}</div>
+    <table>
+      <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="total">الإجمالي الكلي: ${fmt(invoice.total)} ${currency}</div>
+    <div class="sub">طريقة الدفع: ${invoice.paymentType === "cash" ? "نقدي" : "على الحساب"}</div>
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
 }
 
 function buildClosingText(shopName, date, opening, closing, income, expense, withdraw, net, dayTx, currency) {
@@ -124,6 +177,15 @@ function printClosing(shopName, date, opening, closing, income, expense, withdra
   return true;
 }
 
+const LEDGER_KIND_META = {
+  expense: { icon: "📉", label: "مصروف", color: "#d64545" },
+  supplier: { icon: "🚚", label: "مندوب", color: "#b8860b" },
+  employee: { icon: "🧑‍🔧", label: "راتب", color: "#3B82F6" },
+  withdraw: { icon: "↗", label: "سحب", color: "#b8860b" },
+  safe: { icon: "🔒", label: "خزنة", color: "#64748b" },
+  manual: { icon: "✏️", label: "يدوي", color: "#64748b" },
+};
+
 const TYPE_META = {
   income: { label: "إيراد", color: "#0f9d6e", bg: "#e7f7f1", icon: "↑" },
   expense: { label: "مصروف", color: "#d64545", bg: "#fdecec", icon: "↓" },
@@ -139,9 +201,21 @@ function loadData() {
     if (parsed.settings && (parsed.settings.initialCashBalance !== undefined || parsed.settings.initialNetworkBalance !== undefined) && parsed.settings.initialBalance === undefined) {
       settings.initialBalance = Number(parsed.settings.initialCashBalance || 0) + Number(parsed.settings.initialNetworkBalance || 0);
     }
+    let networkLog = parsed.networkLog || [];
+    if (!parsed.networkLog && parsed.settings && Number(parsed.settings.networkAmount || 0) > 0) {
+      networkLog = [{ id: uid(), date: todayISO(), type: "add", kind: "manual", amount: Number(parsed.settings.networkAmount), notes: "رصيد سابق", createdAt: new Date().toISOString() }];
+    }
+    let cashLog = parsed.cashLog || [];
+    if (!parsed.cashLog && parsed.settings && Number(parsed.settings.cashAmount || 0) !== 0) {
+      cashLog = [{ id: uid(), date: todayISO(), type: "add", kind: "manual", amount: Number(parsed.settings.cashAmount), notes: "رصيد سابق", createdAt: new Date().toISOString() }];
+    }
+    delete settings.networkAmount;
+    delete settings.cashAmount;
     return {
       ...DEFAULT_DATA, ...parsed,
       settings,
+      networkLog,
+      cashLog,
       categories: { ...DEFAULT_DATA.categories, ...parsed.categories },
       obligations: parsed.obligations || [],
       partners: parsed.partners || [],
@@ -149,6 +223,10 @@ function loadData() {
       devices: parsed.devices || [],
       suppliers: parsed.suppliers || [],
       closings: parsed.closings || [],
+      inventory: parsed.inventory || [],
+      purchaseInvoices: parsed.purchaseInvoices || [],
+      employees: parsed.employees || [],
+      safeLog: parsed.safeLog || [],
     };
   } catch (e) { return DEFAULT_DATA; }
 }
@@ -161,6 +239,14 @@ function App() {
   const [editItem, setEditItem] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [toast, setToast] = useState(null);
+  const [networkLogOpen, setNetworkLogOpen] = useState(false);
+  const [quickDailyOpen, setQuickDailyOpen] = useState(false);
+
+  const cashTotal = useMemo(() => data.cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0), [data.cashLog]);
+  const networkTotal = useMemo(() => data.networkLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0), [data.networkLog]);
+  const safeTotal = useMemo(() => data.safeLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0), [data.safeLog]);
+  const [cashLogOpen, setCashLogOpen] = useState(false);
+  const [safeLogOpen, setSafeLogOpen] = useState(false);
 
   const persist = useCallback((next) => {
     setData(next);
@@ -212,24 +298,362 @@ function App() {
   }, [monthTotals]);
 
   function upsertTransaction(payload) {
+    let networkLog = data.networkLog;
+    let cashLog = data.cashLog;
+    const source = payload.paymentSource || "none"; // 'none' | 'cash' | 'network'
+
     if (payload.id) {
-      persist({ ...data, transactions: data.transactions.map(t => t.id === payload.id ? { ...t, ...payload } : t) });
+      const old = data.transactions.find(t => t.id === payload.id);
+      const updated = { ...old, ...payload };
+      const oldNetId = old.linkedNetworkEntryId || null;
+      const oldCashId = old.linkedCashEntryId || null;
+
+      // remove stale links that no longer match the chosen source
+      if (oldNetId && source !== "network") { networkLog = networkLog.filter(e => e.id !== oldNetId); updated.linkedNetworkEntryId = null; }
+      if (oldCashId && source !== "cash") { cashLog = cashLog.filter(e => e.id !== oldCashId); updated.linkedCashEntryId = null; }
+
+      if (source === "network") {
+        if (oldNetId) {
+          networkLog = networkLog.map(e => e.id === oldNetId ? { ...e, amount: Number(updated.amount), date: updated.date, notes: `مصروف: ${updated.title}`, kind: "expense" } : e);
+        } else {
+          const entryId = uid();
+          networkLog = [{ id: entryId, date: updated.date, type: "deduct", amount: Number(updated.amount), notes: `مصروف: ${updated.title}`, kind: "expense", linkedTxId: updated.id, createdAt: new Date().toISOString() }, ...networkLog];
+          updated.linkedNetworkEntryId = entryId;
+        }
+      } else if (source === "cash") {
+        if (oldCashId) {
+          cashLog = cashLog.map(e => e.id === oldCashId ? { ...e, amount: Number(updated.amount), date: updated.date, notes: `مصروف: ${updated.title}`, kind: "expense" } : e);
+        } else {
+          const entryId = uid();
+          cashLog = [{ id: entryId, date: updated.date, type: "deduct", amount: Number(updated.amount), notes: `مصروف: ${updated.title}`, kind: "expense", linkedTxId: updated.id, createdAt: new Date().toISOString() }, ...cashLog];
+          updated.linkedCashEntryId = entryId;
+        }
+      }
+      persist({ ...data, transactions: data.transactions.map(t => t.id === payload.id ? updated : t), networkLog, cashLog });
       showToast("تم تحديث العملية");
     } else {
       const item = { ...payload, id: uid(), createdAt: new Date().toISOString() };
-      persist({ ...data, transactions: [item, ...data.transactions] });
+      if (source === "network") {
+        const entryId = uid();
+        networkLog = [{ id: entryId, date: item.date, type: "deduct", amount: Number(item.amount), notes: `مصروف: ${item.title}`, kind: "expense", linkedTxId: item.id, createdAt: new Date().toISOString() }, ...networkLog];
+        item.linkedNetworkEntryId = entryId;
+      } else if (source === "cash") {
+        const entryId = uid();
+        cashLog = [{ id: entryId, date: item.date, type: "deduct", amount: Number(item.amount), notes: `مصروف: ${item.title}`, kind: "expense", linkedTxId: item.id, createdAt: new Date().toISOString() }, ...cashLog];
+        item.linkedCashEntryId = entryId;
+      }
+      persist({ ...data, transactions: [item, ...data.transactions], networkLog, cashLog });
       showToast("تمت إضافة العملية");
     }
     setAddOpen(false); setEditItem(null);
   }
 
   function deleteTransaction(id) {
-    persist({ ...data, transactions: data.transactions.filter(t => t.id !== id) });
+    const t = data.transactions.find(x => x.id === id);
+    const networkLog = t?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== t.linkedNetworkEntryId) : data.networkLog;
+    const cashLog = t?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== t.linkedCashEntryId) : data.cashLog;
+    persist({ ...data, transactions: data.transactions.filter(t => t.id !== id), networkLog, cashLog });
     setConfirmDelete(null);
     showToast("تم الحذف");
   }
 
   function updateSettings(patch) { persist({ ...data, settings: { ...data.settings, ...patch } }); }
+
+  function addCashEntry(entry) {
+    const item = { ...entry, kind: entry.kind || "manual", id: uid(), createdAt: new Date().toISOString() };
+    persist({ ...data, cashLog: [item, ...data.cashLog] });
+    showToast(entry.type === "add" ? "تمت إضافة المبلغ للكاش" : "تم خصم المبلغ من الكاش");
+  }
+
+  function deleteCashEntry(id) {
+    const entry = data.cashLog.find(e => e.id === id);
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    let employees = data.employees;
+    if (entry?.linkedTxId) {
+      transactions = transactions.filter(t => t.id !== entry.linkedTxId);
+      suppliers = suppliers.map(s => ({ ...s, entries: s.entries.filter(e2 => e2.linkedCashEntryId !== id) }));
+      employees = employees.map(e => ({ ...e, entries: e.entries.filter(e2 => e2.linkedCashEntryId !== id) }));
+    }
+    persist({ ...data, cashLog: data.cashLog.filter(e => e.id !== id), transactions, suppliers, employees });
+  }
+
+  function addCashDeduction(payload) {
+    const amount = Number(payload.amount);
+    const date = payload.date;
+    let transactions = [...data.transactions];
+    let suppliers = [...data.suppliers];
+    let employees = [...data.employees];
+    const cashEntryId = uid();
+    let linkedTxId = null;
+    let kind = "manual";
+    let autoLabel = "";
+
+    if (payload.purpose === "expense") {
+      kind = "expense";
+      autoLabel = payload.title ? `مصروف: ${payload.title}` : "مصروف";
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "expense", title: payload.title || "مصروف نقدي", category: payload.category || "",
+        amount, date, notes: payload.notes || "", linkedCashEntryId: cashEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else if (payload.purpose === "supplier" && payload.supplierId) {
+      const supplier = suppliers.find(s => s.id === payload.supplierId);
+      if (supplier) {
+        kind = "supplier";
+        autoLabel = `تسديد مندوب: ${supplier.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        suppliers = suppliers.map(s => s.id === payload.supplierId ? {
+          ...s, entries: [{ id: uid(), type: "payment", amount, date, notes: payload.notes || "", linkedTxId, linkedCashEntryId: cashEntryId, createdAt: new Date().toISOString() }, ...s.entries],
+        } : s);
+      }
+    } else if (payload.purpose === "employee" && payload.employeeId) {
+      const emp = employees.find(e => e.id === payload.employeeId);
+      if (emp) {
+        kind = "employee";
+        autoLabel = `راتب: ${emp.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        employees = employees.map(e => e.id === payload.employeeId ? {
+          ...e, entries: [{ id: uid(), amount, date, notes: payload.notes || "", linkedTxId, linkedCashEntryId: cashEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+        } : e);
+      }
+    } else if (payload.purpose === "withdraw") {
+      kind = "withdraw";
+      const partnerName = payload.partnerId ? (data.partners.find(p => p.id === payload.partnerId)?.name) : null;
+      autoLabel = `سحب: ${partnerName || payload.person || ""}`;
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "withdraw", person: partnerName || payload.person || "", partnerId: payload.partnerId || null,
+        amount, date, notes: payload.notes || "", linkedCashEntryId: cashEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else {
+      autoLabel = "خصم عام";
+    }
+
+    const finalNotes = [autoLabel, payload.notes].filter(Boolean).join(" · ");
+    const cashEntry = { id: cashEntryId, date, type: "deduct", kind, amount, notes: finalNotes, linkedTxId, createdAt: new Date().toISOString() };
+    persist({ ...data, transactions, suppliers, employees, cashLog: [cashEntry, ...data.cashLog] });
+    showToast("تم تسجيل الخصم من الكاش");
+  }
+
+  function addNetworkEntry(entry) {
+    const item = { ...entry, kind: entry.kind || "manual", id: uid(), createdAt: new Date().toISOString() };
+    persist({ ...data, networkLog: [item, ...data.networkLog] });
+    showToast(entry.type === "add" ? "تمت إضافة المبلغ للشبكة" : "تم خصم المبلغ من الشبكة");
+  }
+
+  function deleteNetworkEntry(id) {
+    const entry = data.networkLog.find(e => e.id === id);
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    let employees = data.employees;
+    if (entry?.linkedTxId) {
+      transactions = transactions.filter(t => t.id !== entry.linkedTxId);
+      suppliers = suppliers.map(s => ({ ...s, entries: s.entries.filter(e2 => e2.linkedNetworkEntryId !== id) }));
+      employees = employees.map(e => ({ ...e, entries: e.entries.filter(e2 => e2.linkedNetworkEntryId !== id) }));
+    }
+    persist({ ...data, networkLog: data.networkLog.filter(e => e.id !== id), transactions, suppliers, employees });
+  }
+
+  function transferToSafe(payload) {
+    const amount = Number(payload.amount);
+    let networkLog = data.networkLog;
+    let cashLog = data.cashLog;
+    if (payload.source === "cash") {
+      cashLog = [{ id: uid(), date: payload.date, type: "deduct", amount, notes: "تحويل إلى الخزنة" + (payload.notes ? " - " + payload.notes : ""), kind: "safe", linkedTxId: null, createdAt: new Date().toISOString() }, ...cashLog];
+    } else if (payload.source === "network") {
+      networkLog = [{ id: uid(), date: payload.date, type: "deduct", amount, notes: "تحويل إلى الخزنة" + (payload.notes ? " - " + payload.notes : ""), kind: "safe", linkedTxId: null, createdAt: new Date().toISOString() }, ...networkLog];
+    }
+    const safeEntry = { id: uid(), date: payload.date, type: "add", amount, source: payload.source, notes: payload.notes || "", createdAt: new Date().toISOString() };
+    persist({ ...data, networkLog, cashLog, safeLog: [safeEntry, ...data.safeLog] });
+    showToast("تم تحويل المبلغ للخزنة");
+  }
+
+  function withdrawFromSafe(payload) {
+    const safeEntry = { id: uid(), date: payload.date, type: "deduct", amount: Number(payload.amount), source: null, notes: payload.notes || "", createdAt: new Date().toISOString() };
+    persist({ ...data, safeLog: [safeEntry, ...data.safeLog] });
+    showToast("تم تسجيل السحب من الخزنة");
+  }
+
+  function deleteSafeEntry(id) {
+    const entry = data.safeLog.find(e => e.id === id);
+    let networkLog = data.networkLog;
+    let cashLog = data.cashLog;
+    if (entry && entry.type === "add") {
+      if (entry.source === "cash") {
+        cashLog = [{ id: uid(), date: todayISO(), type: "add", kind: "safe", amount: entry.amount, notes: "إلغاء تحويل من الخزنة", linkedTxId: null, createdAt: new Date().toISOString() }, ...cashLog];
+      } else if (entry.source === "network") {
+        networkLog = [{ id: uid(), date: todayISO(), type: "add", amount: entry.amount, notes: "إلغاء تحويل من الخزنة", kind: "safe", linkedTxId: null, createdAt: new Date().toISOString() }, ...networkLog];
+      }
+    }
+    persist({ ...data, networkLog, cashLog, safeLog: data.safeLog.filter(e => e.id !== id) });
+  }
+
+  function addNetworkDeduction(payload) {
+    const amount = Number(payload.amount);
+    const date = payload.date;
+    let transactions = [...data.transactions];
+    let suppliers = [...data.suppliers];
+    let employees = [...data.employees];
+    const networkEntryId = uid();
+    let linkedTxId = null;
+    let kind = "manual";
+    let autoLabel = "";
+
+    if (payload.purpose === "expense") {
+      kind = "expense";
+      autoLabel = payload.title ? `مصروف: ${payload.title}` : "مصروف";
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "expense", title: payload.title || "مصروف عبر الشبكة", category: payload.category || "",
+        amount, date, notes: payload.notes || "", linkedNetworkEntryId: networkEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else if (payload.purpose === "supplier" && payload.supplierId) {
+      const supplier = suppliers.find(s => s.id === payload.supplierId);
+      if (supplier) {
+        kind = "supplier";
+        autoLabel = `تسديد مندوب: ${supplier.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        suppliers = suppliers.map(s => s.id === payload.supplierId ? {
+          ...s, entries: [{ id: uid(), type: "payment", amount, date, notes: payload.notes || "", linkedTxId, linkedNetworkEntryId: networkEntryId, createdAt: new Date().toISOString() }, ...s.entries],
+        } : s);
+      }
+    } else if (payload.purpose === "employee" && payload.employeeId) {
+      const emp = employees.find(e => e.id === payload.employeeId);
+      if (emp) {
+        kind = "employee";
+        autoLabel = `راتب: ${emp.name}`;
+        linkedTxId = uid();
+        transactions = [{
+          id: linkedTxId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
+          amount, date, notes: payload.notes || "", createdAt: new Date().toISOString(),
+        }, ...transactions];
+        employees = employees.map(e => e.id === payload.employeeId ? {
+          ...e, entries: [{ id: uid(), amount, date, notes: payload.notes || "", linkedTxId, linkedNetworkEntryId: networkEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+        } : e);
+      }
+    } else if (payload.purpose === "withdraw") {
+      kind = "withdraw";
+      const partnerName = payload.partnerId ? (data.partners.find(p => p.id === payload.partnerId)?.name) : null;
+      autoLabel = `سحب: ${partnerName || payload.person || ""}`;
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "withdraw", person: partnerName || payload.person || "", partnerId: payload.partnerId || null,
+        amount, date, notes: payload.notes || "", linkedNetworkEntryId: networkEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else {
+      autoLabel = "خصم عام";
+    }
+
+    const finalNotes = [autoLabel, payload.notes].filter(Boolean).join(" · ");
+    const networkEntry = { id: networkEntryId, date, type: "deduct", kind, amount, notes: finalNotes, linkedTxId, createdAt: new Date().toISOString() };
+    persist({ ...data, transactions, suppliers, employees, networkLog: [networkEntry, ...data.networkLog] });
+    showToast("تم تسجيل الخصم من الشبكة");
+  }
+
+  function submitQuickDaily(payload) {
+    let transactions = [...data.transactions];
+    let suppliers = [...data.suppliers];
+    let employees = [...data.employees];
+    let networkLog = [...data.networkLog];
+    let cashLog = [...data.cashLog];
+    let settings = { ...data.settings };
+
+    if (Number(payload.salesAmount) > 0) {
+      transactions = [{
+        id: uid(), type: "income", title: payload.salesTitle || "مبيعات اليوم", category: payload.salesCategory || "",
+        amount: Number(payload.salesAmount), date: payload.date, notes: payload.salesNotes || "", createdAt: new Date().toISOString(),
+      }, ...transactions];
+    }
+
+    (payload.expenses || []).forEach(exp => {
+      if (!(Number(exp.amount) > 0)) return;
+      const txId = uid();
+      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      if (exp.paymentSource === "network") {
+        linkedNetworkEntryId = uid();
+        networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
+      } else if (exp.paymentSource === "cash") {
+        linkedCashEntryId = uid();
+        cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      }
+      transactions = [{
+        id: txId, type: "expense", title: exp.title || `مصروف يوم ${payload.date}`, category: exp.category || "",
+        amount: Number(exp.amount), date: payload.date, notes: exp.notes || "",
+        linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    });
+
+    (payload.supplierPayments || []).forEach(sp => {
+      if (!sp.supplierId || !(Number(sp.amount) > 0)) return;
+      const supplier = suppliers.find(s => s.id === sp.supplierId);
+      if (!supplier) return;
+      const txId = uid();
+      transactions = [{
+        id: txId, type: "expense", title: `تسديد لـ ${supplier.name}`, category: "تسديد مناديب",
+        amount: Number(sp.amount), date: payload.date, notes: "يومية سريعة", createdAt: new Date().toISOString(),
+      }, ...transactions];
+      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      if (sp.paymentSource === "network") {
+        linkedNetworkEntryId = uid();
+        networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(sp.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
+      } else if (sp.paymentSource === "cash") {
+        linkedCashEntryId = uid();
+        cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(sp.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      }
+      suppliers = suppliers.map(s => s.id === sp.supplierId ? {
+        ...s, entries: [{ id: uid(), type: "payment", amount: Number(sp.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...s.entries],
+      } : s);
+    });
+
+    (payload.employeePayments || []).forEach(ep => {
+      if (!ep.employeeId || !(Number(ep.amount) > 0)) return;
+      const emp = employees.find(x => x.id === ep.employeeId);
+      if (!emp) return;
+      const txId = uid();
+      transactions = [{
+        id: txId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
+        amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", createdAt: new Date().toISOString(),
+      }, ...transactions];
+      let linkedNetworkEntryId = null, linkedCashEntryId = null;
+      if (ep.paymentSource === "network") {
+        linkedNetworkEntryId = uid();
+        networkLog = [{ id: linkedNetworkEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
+      } else if (ep.paymentSource === "cash") {
+        linkedCashEntryId = uid();
+        cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      }
+      employees = employees.map(e => e.id === ep.employeeId ? {
+        ...e, entries: [{ id: uid(), amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+      } : e);
+    });
+
+    if (Number(payload.networkToday) > 0) {
+      networkLog = [{ id: uid(), date: payload.date, type: "add", kind: "manual", amount: Number(payload.networkToday), notes: "يومية سريعة", createdAt: new Date().toISOString() }, ...networkLog];
+    }
+    if (payload.cashToday !== "" && payload.cashToday != null) {
+      const currentCash = data.cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
+      const delta = Number(payload.cashToday) - currentCash;
+      if (delta !== 0) {
+        cashLog = [{ id: uid(), date: payload.date, type: delta >= 0 ? "add" : "deduct", kind: "manual", amount: Math.abs(delta), notes: "تحديث كاش اليوم (يومية سريعة)", createdAt: new Date().toISOString() }, ...cashLog];
+      }
+    }
+
+    persist({ ...data, transactions, suppliers, employees, networkLog, cashLog, settings });
+    showToast("تم حفظ يومية اليوم بكل تفاصيلها");
+  }
 
   function addCategory(type, name) {
     name = name.trim();
@@ -322,6 +746,192 @@ function App() {
     showToast("تم حذف الجهاز والعمليات المرتبطة به");
   }
 
+  function upsertInventoryItem(payload) {
+    if (payload.id) persist({ ...data, inventory: data.inventory.map(i => i.id === payload.id ? { ...i, ...payload } : i) });
+    else persist({ ...data, inventory: [{ ...payload, id: uid(), createdAt: new Date().toISOString() }, ...data.inventory] });
+    showToast(payload.id ? "تم تحديث الصنف" : "تمت إضافة الصنف للمخزون");
+  }
+
+  function deleteInventoryItem(id) {
+    persist({ ...data, inventory: data.inventory.filter(i => i.id !== id) });
+    showToast("تم حذف الصنف");
+  }
+
+  function adjustInventoryQty(id, delta) {
+    persist({ ...data, inventory: data.inventory.map(i => i.id === id ? { ...i, quantity: Math.max(0, Number(i.quantity || 0) + delta) } : i) });
+    showToast(delta >= 0 ? "تمت إضافة الكمية" : "تم خصم الكمية");
+  }
+
+  function createPurchaseInvoice(payload) {
+    const total = payload.items.reduce((s, it) => s + Number(it.qty) * Number(it.unitCost), 0);
+    let inventory = [...data.inventory];
+    payload.items.forEach(it => {
+      const idx = inventory.findIndex(inv => inv.name.trim().toLowerCase() === it.name.trim().toLowerCase());
+      if (idx >= 0) {
+        inventory[idx] = { ...inventory[idx], quantity: Number(inventory[idx].quantity || 0) + Number(it.qty), unitCost: Number(it.unitCost) };
+      } else {
+        inventory.push({ id: uid(), name: it.name.trim(), category: "", quantity: Number(it.qty), unitCost: Number(it.unitCost), unitPrice: 0, minQty: 0, notes: "", createdAt: new Date().toISOString() });
+      }
+    });
+
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    let linkedTxId = null, linkedEntryId = null;
+    const itemsSummary = payload.items.map(it => `${it.name} × ${it.qty}`).join("، ");
+
+    if (payload.paymentType === "cash") {
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "expense", title: `فاتورة مشتريات${payload.supplierName ? " - " + payload.supplierName : ""}`,
+        category: "مشتريات", amount: total, date: payload.date, notes: itemsSummary, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else if (payload.supplierId) {
+      linkedEntryId = uid();
+      suppliers = suppliers.map(s => s.id === payload.supplierId ? {
+        ...s, entries: [{ id: linkedEntryId, type: "debt", amount: total, date: payload.date, notes: `فاتورة مشتريات: ${itemsSummary}`, linkedTxId: null, createdAt: new Date().toISOString() }, ...s.entries],
+      } : s);
+    }
+
+    const invoice = {
+      id: uid(), invoiceNo: (data.purchaseInvoices.length + 1), supplierId: payload.supplierId || null, supplierName: payload.supplierName || "",
+      date: payload.date, items: payload.items.map(it => ({ name: it.name.trim(), qty: Number(it.qty), unitCost: Number(it.unitCost), lineTotal: Number(it.qty) * Number(it.unitCost) })),
+      total, paymentType: payload.paymentType, linkedTxId, linkedEntryId, notes: payload.notes || "", returns: [], createdAt: new Date().toISOString(),
+    };
+
+    persist({ ...data, inventory, transactions, suppliers, purchaseInvoices: [invoice, ...data.purchaseInvoices] });
+    showToast("تم حفظ الفاتورة وتحديث المخزون");
+  }
+
+  function deletePurchaseInvoice(id) {
+    const inv = data.purchaseInvoices.find(i => i.id === id);
+    if (!inv) return;
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    if (inv.linkedTxId) transactions = transactions.filter(t => t.id !== inv.linkedTxId);
+    if (inv.linkedEntryId && inv.supplierId) {
+      suppliers = suppliers.map(s => s.id === inv.supplierId ? { ...s, entries: s.entries.filter(e => e.id !== inv.linkedEntryId) } : s);
+    }
+    (inv.returns || []).forEach(ret => {
+      if (ret.linkedTxId) transactions = transactions.filter(t => t.id !== ret.linkedTxId);
+      if (ret.linkedEntryId && inv.supplierId) suppliers = suppliers.map(s => s.id === inv.supplierId ? { ...s, entries: s.entries.filter(e => e.id !== ret.linkedEntryId) } : s);
+    });
+    persist({ ...data, transactions, suppliers, purchaseInvoices: data.purchaseInvoices.filter(i => i.id !== id) });
+    showToast("تم حذف الفاتورة (الكميات المضافة للمخزون تبقى كما هي)");
+  }
+
+  function addInvoiceReturn(invoiceId, payload) {
+    const invoice = data.purchaseInvoices.find(i => i.id === invoiceId);
+    if (!invoice) return;
+    const total = payload.items.reduce((s, it) => s + Number(it.qty) * Number(it.unitCost), 0);
+    let inventory = [...data.inventory];
+    payload.items.forEach(it => {
+      const idx = inventory.findIndex(inv => inv.name.trim().toLowerCase() === it.name.trim().toLowerCase());
+      if (idx >= 0) inventory[idx] = { ...inventory[idx], quantity: Math.max(0, Number(inventory[idx].quantity || 0) - Number(it.qty)) };
+    });
+
+    let transactions = data.transactions;
+    let suppliers = data.suppliers;
+    let linkedTxId = null, linkedEntryId = null;
+    const itemsSummary = payload.items.map(it => `${it.name} × ${it.qty}`).join("، ");
+
+    if (invoice.paymentType === "cash") {
+      linkedTxId = uid();
+      transactions = [{
+        id: linkedTxId, type: "income", title: `مرتجع فاتورة #${invoice.invoiceNo}`, category: "مرتجع مشتريات",
+        amount: total, date: payload.date, notes: itemsSummary, createdAt: new Date().toISOString(),
+      }, ...transactions];
+    } else if (invoice.supplierId) {
+      linkedEntryId = uid();
+      suppliers = suppliers.map(s => s.id === invoice.supplierId ? {
+        ...s, entries: [{ id: linkedEntryId, type: "return", amount: total, date: payload.date, notes: `رجيع فاتورة #${invoice.invoiceNo}: ${itemsSummary}`, linkedTxId: null, createdAt: new Date().toISOString() }, ...s.entries],
+      } : s);
+    }
+
+    const ret = {
+      id: uid(), date: payload.date, items: payload.items.map(it => ({ name: it.name.trim(), qty: Number(it.qty), unitCost: Number(it.unitCost), lineTotal: Number(it.qty) * Number(it.unitCost) })),
+      total, notes: payload.notes || "", linkedTxId, linkedEntryId, createdAt: new Date().toISOString(),
+    };
+
+    persist({
+      ...data, inventory, transactions, suppliers,
+      purchaseInvoices: data.purchaseInvoices.map(i => i.id === invoiceId ? { ...i, returns: [ret, ...(i.returns || [])] } : i),
+    });
+    showToast("تم تسجيل الرجيع وتحديث المخزون");
+  }
+
+  function deleteInvoiceReturn(invoiceId, returnId) {
+    const invoice = data.purchaseInvoices.find(i => i.id === invoiceId);
+    const ret = invoice?.returns?.find(r => r.id === returnId);
+    if (!ret) return;
+    let inventory = [...data.inventory];
+    ret.items.forEach(it => {
+      const idx = inventory.findIndex(inv => inv.name.trim().toLowerCase() === it.name.trim().toLowerCase());
+      if (idx >= 0) inventory[idx] = { ...inventory[idx], quantity: Number(inventory[idx].quantity || 0) + Number(it.qty) };
+    });
+    let transactions = ret.linkedTxId ? data.transactions.filter(t => t.id !== ret.linkedTxId) : data.transactions;
+    let suppliers = data.suppliers;
+    if (ret.linkedEntryId && invoice.supplierId) {
+      suppliers = suppliers.map(s => s.id === invoice.supplierId ? { ...s, entries: s.entries.filter(e => e.id !== ret.linkedEntryId) } : s);
+    }
+    persist({
+      ...data, inventory, transactions, suppliers,
+      purchaseInvoices: data.purchaseInvoices.map(i => i.id === invoiceId ? { ...i, returns: (i.returns || []).filter(r => r.id !== returnId) } : i),
+    });
+    showToast("تم إلغاء الرجيع وإرجاع الكمية للمخزون");
+  }
+
+  function upsertEmployee(p) {
+    if (p.id) persist({ ...data, employees: data.employees.map(x => x.id === p.id ? { ...x, ...p } : x) });
+    else persist({ ...data, employees: [...data.employees, { ...p, id: uid(), entries: [], createdAt: new Date().toISOString() }] });
+    showToast(p.id ? "تم تحديث بيانات الموظف" : "تمت إضافة الموظف");
+  }
+
+  function deleteEmployee(id) {
+    const emp = data.employees.find(e => e.id === id);
+    const linkedTxIds = (emp?.entries || []).map(e => e.linkedTxId).filter(Boolean);
+    persist({ ...data, employees: data.employees.filter(e => e.id !== id), transactions: data.transactions.filter(t => !linkedTxIds.includes(t.id)) });
+    showToast("تم حذف الموظف وسجل دفعاته");
+  }
+
+  function addEmployeePayment(employeeId, entry) {
+    const emp = data.employees.find(e => e.id === employeeId);
+    if (!emp) return;
+    const txId = uid();
+    const tx = {
+      id: txId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
+      amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", createdAt: new Date().toISOString(),
+    };
+    let networkLog = data.networkLog;
+    let cashLog = data.cashLog;
+    let linkedNetworkEntryId = null;
+    let linkedCashEntryId = null;
+    if (entry.paymentSource === "network") {
+      linkedNetworkEntryId = uid();
+      networkLog = [{ id: linkedNetworkEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...networkLog];
+    } else if (entry.paymentSource === "cash") {
+      linkedCashEntryId = uid();
+      cashLog = [{ id: linkedCashEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+    }
+    const newEntry = { id: uid(), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() };
+    persist({
+      ...data, transactions: [tx, ...data.transactions], networkLog, cashLog,
+      employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: [newEntry, ...e.entries] } : e),
+    });
+    showToast("تم تسجيل الدفعة كمصروف راتب");
+  }
+
+  function deleteEmployeePayment(employeeId, entryId) {
+    const emp = data.employees.find(e => e.id === employeeId);
+    const entry = emp?.entries.find(e => e.id === entryId);
+    const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
+    const networkLog = entry?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== entry.linkedNetworkEntryId) : data.networkLog;
+    const cashLog = entry?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId) : data.cashLog;
+    persist({
+      ...data, transactions, networkLog, cashLog,
+      employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: e.entries.filter(x => x.id !== entryId) } : e),
+    });
+  }
+
   function upsertSupplier(p) {
     if (p.id) persist({ ...data, suppliers: data.suppliers.map(x => x.id === p.id ? { ...x, ...p } : x) });
     else persist({ ...data, suppliers: [...data.suppliers, { ...p, id: uid(), entries: [], createdAt: new Date().toISOString() }] });
@@ -338,7 +948,11 @@ function App() {
     const supplier = data.suppliers.find(s => s.id === supplierId);
     if (!supplier) return;
     let linkedTxId = null;
+    let linkedNetworkEntryId = null;
+    let linkedCashEntryId = null;
     let transactions = data.transactions;
+    let networkLog = data.networkLog;
+    let cashLog = data.cashLog;
     if (entry.type === "payment") {
       linkedTxId = uid();
       const tx = {
@@ -346,10 +960,17 @@ function App() {
         amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", createdAt: new Date().toISOString(),
       };
       transactions = [tx, ...transactions];
+      if (entry.paymentSource === "network") {
+        linkedNetworkEntryId = uid();
+        networkLog = [{ id: linkedNetworkEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId, createdAt: new Date().toISOString() }, ...networkLog];
+      } else if (entry.paymentSource === "cash") {
+        linkedCashEntryId = uid();
+        cashLog = [{ id: linkedCashEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `تسديد مندوب: ${supplier.name}`, kind: "supplier", linkedTxId, createdAt: new Date().toISOString() }, ...cashLog];
+      }
     }
-    const newEntry = { id: uid(), type: entry.type, amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId, createdAt: new Date().toISOString() };
+    const newEntry = { id: uid(), type: entry.type, amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId, linkedNetworkEntryId, linkedCashEntryId, createdAt: new Date().toISOString() };
     persist({
-      ...data, transactions,
+      ...data, transactions, networkLog, cashLog,
       suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: [newEntry, ...s.entries] } : s),
     });
     showToast(entry.type === "payment" ? "تم تسجيل التسديد كمصروف" : "تمت إضافة الدين");
@@ -359,8 +980,10 @@ function App() {
     const supplier = data.suppliers.find(s => s.id === supplierId);
     const entry = supplier?.entries.find(e => e.id === entryId);
     const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
+    const networkLog = entry?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== entry.linkedNetworkEntryId) : data.networkLog;
+    const cashLog = entry?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId) : data.cashLog;
     persist({
-      ...data, transactions,
+      ...data, transactions, networkLog, cashLog,
       suppliers: data.suppliers.map(s => s.id === supplierId ? { ...s, entries: s.entries.filter(e => e.id !== entryId) } : s),
     });
   }
@@ -398,15 +1021,43 @@ function App() {
     downloadFile(`تقفيلة-${dateStr}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
   }
 
+  function exportBackup() {
+    const backup = { ...data, __backupInfo: { app: "shop-finance-app", exportedAt: new Date().toISOString(), version: 1 } };
+    downloadFile(`نسخة-احتياطية-${data.settings.shopName}-${todayISO()}.json`, JSON.stringify(backup, null, 2), "application/json;charset=utf-8;");
+    showToast("تم تنزيل النسخة الاحتياطية");
+  }
+
+  function importBackup(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (!parsed || !parsed.settings || !Array.isArray(parsed.transactions)) {
+          showToast("الملف غير صالح، تأكد إنه نسخة احتياطية صحيحة", "error");
+          return;
+        }
+        delete parsed.__backupInfo;
+        persist({ ...DEFAULT_DATA, ...parsed, settings: { ...DEFAULT_DATA.settings, ...parsed.settings } });
+        showToast("تم استرجاع النسخة الاحتياطية بنجاح");
+      } catch (err) {
+        showToast("تعذرت قراءة الملف، تأكد إنه ملف JSON صحيح", "error");
+      }
+    };
+    reader.readAsText(file);
+  }
+
   return (
     <div dir="rtl" className="min-h-[700px] bg-[#F6F7F9] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
       <TopBar shopName={data.settings.shopName} balance={totals.balance} currency={data.settings.currency}
-        cashAmount={data.settings.cashAmount} networkAmount={data.settings.networkAmount} onUpdateCashNetwork={updateSettings} />
+        cashTotal={cashTotal} onOpenCashLog={() => setCashLogOpen(true)}
+        networkTotal={networkTotal} onOpenNetworkLog={() => setNetworkLogOpen(true)}
+        safeTotal={safeTotal} onOpenSafeLog={() => setSafeLogOpen(true)} />
 
       <div className="flex-1 overflow-y-auto pb-24 px-4 pt-4">
         {tab === "dashboard" && (
           <Dashboard data={data} totals={totals} curMonth={curMonth} monthTotals={monthTotals}
-            onOpenTx={(item) => { setAddType(item.type); setEditItem(item); setAddOpen(true); }} />
+            onOpenTx={(item) => { setAddType(item.type); setEditItem(item); setAddOpen(true); }}
+            onOpenQuickDaily={() => setQuickDailyOpen(true)} />
         )}
         {tab === "ledger" && (
           <Ledger data={data}
@@ -427,6 +1078,15 @@ function App() {
         {tab === "suppliers" && (
           <Suppliers data={data} onSave={upsertSupplier} onDelete={deleteSupplier} onAddEntry={addSupplierEntry} onDeleteEntry={deleteSupplierEntry} />
         )}
+        {tab === "inventory" && (
+          <Inventory data={data} onSave={upsertInventoryItem} onDelete={deleteInventoryItem} onAdjust={adjustInventoryQty} />
+        )}
+        {tab === "invoices" && (
+          <PurchaseInvoices data={data} onCreate={createPurchaseInvoice} onDelete={deletePurchaseInvoice} onAddReturn={addInvoiceReturn} onDeleteReturn={deleteInvoiceReturn} />
+        )}
+        {tab === "employees" && (
+          <Employees data={data} onSave={upsertEmployee} onDelete={deleteEmployee} onAddPayment={addEmployeePayment} onDeletePayment={deleteEmployeePayment} />
+        )}
         {tab === "closing" && (
           <DailyClosing data={data} totals={totals} onSaveClosing={saveClosing} exportDayCSV={exportDayCSV} />
         )}
@@ -437,7 +1097,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} />
         )}
       </div>
 
@@ -445,7 +1105,7 @@ function App() {
       <BottomNav tab={tab} setTab={setTab} />
 
       {addOpen && (
-        <TxModal type={addType} setType={setAddType} categories={data.categories} initial={editItem} currency={data.settings.currency}
+        <TxModal type={addType} setType={setAddType} categories={data.categories} initial={editItem} currency={data.settings.currency} partners={data.partners}
           onClose={() => { setAddOpen(false); setEditItem(null); }} onSave={upsertTransaction} />
       )}
       {confirmDelete && (
@@ -453,6 +1113,28 @@ function App() {
           message={`هل تريد حذف "${confirmDelete.title || confirmDelete.person}" بمبلغ ${fmt(confirmDelete.amount)} ${data.settings.currency}؟`}
           onCancel={() => setConfirmDelete(null)} onConfirm={() => deleteTransaction(confirmDelete.id)} />
       )}
+      {quickDailyOpen && (
+        <QuickDailyModal data={data} onClose={() => setQuickDailyOpen(false)} onSave={(payload) => { submitQuickDaily(payload); setQuickDailyOpen(false); }} />
+      )}
+
+      {cashLogOpen && (
+        <LedgerLogModal title="سجل الكاش" log={data.cashLog} currency={data.settings.currency} total={cashTotal}
+          categories={data.categories} suppliers={data.suppliers} employees={data.employees} partners={data.partners}
+          onClose={() => setCashLogOpen(false)} onAdd={addCashEntry} onDeduct={addCashDeduction} onDelete={deleteCashEntry} />
+      )}
+
+      {networkLogOpen && (
+        <LedgerLogModal title="سجل الشبكة" log={data.networkLog} currency={data.settings.currency} total={networkTotal}
+          categories={data.categories} suppliers={data.suppliers} employees={data.employees} partners={data.partners}
+          onClose={() => setNetworkLogOpen(false)} onAdd={addNetworkEntry} onDeduct={addNetworkDeduction} onDelete={deleteNetworkEntry} />
+      )}
+
+      {safeLogOpen && (
+        <SafeLogModal log={data.safeLog} currency={data.settings.currency} total={safeTotal}
+          cashTotal={cashTotal} networkTotal={networkTotal}
+          onClose={() => setSafeLogOpen(false)} onTransfer={transferToSafe} onWithdraw={withdrawFromSafe} onDelete={deleteSafeEntry} />
+      )}
+
       {toast && (
         <div className={`fixed bottom-24 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full text-sm text-white shadow-lg z-50 ${toast.kind === "error" ? "bg-red-500" : "bg-slate-800"}`}>
           {toast.msg}
@@ -462,12 +1144,7 @@ function App() {
   );
 }
 
-function TopBar({ shopName, balance, currency, cashAmount, networkAmount, onUpdateCashNetwork }) {
-  const [cash, setCash] = useState(cashAmount);
-  const [network, setNetwork] = useState(networkAmount);
-  useEffect(() => { setCash(cashAmount); }, [cashAmount]);
-  useEffect(() => { setNetwork(networkAmount); }, [networkAmount]);
-
+function TopBar({ shopName, balance, currency, cashTotal, onOpenCashLog, networkTotal, onOpenNetworkLog, safeTotal, onOpenSafeLog }) {
   return (
     <div className="px-5 pt-6 pb-5 bg-[#12213B] text-white rounded-b-3xl shadow-sm">
       <div className="text-xs text-white/60 mb-1">{shopName}</div>
@@ -478,29 +1155,239 @@ function TopBar({ shopName, balance, currency, cashAmount, networkAmount, onUpda
         </div>
         <span className="text-3xl">💰</span>
       </div>
-      <div className="flex items-center gap-2">
-        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2">
-          <div className="text-[10px] text-white/50 mb-0.5">💵 كاش عندك (تحدّثه بنفسك)</div>
-          <input type="number" value={cash} onChange={e => setCash(e.target.value)}
-            onBlur={() => onUpdateCashNetwork({ cashAmount: Number(cash || 0) })}
-            className="bg-transparent text-sm font-bold num w-full outline-none border-b border-white/0 focus:border-white/40" />
-        </div>
-        <div className="flex-1 bg-white/10 rounded-xl px-3 py-2">
-          <div className="text-[10px] text-white/50 mb-0.5">💳 شبكة عندك (تحدّثها بنفسك)</div>
-          <input type="number" value={network} onChange={e => setNetwork(e.target.value)}
-            onBlur={() => onUpdateCashNetwork({ networkAmount: Number(network || 0) })}
-            className="bg-transparent text-sm font-bold num w-full outline-none border-b border-white/0 focus:border-white/40" />
-        </div>
+      <div className="flex items-center gap-2 mb-2">
+        <button onClick={onOpenCashLog} className="flex-1 bg-white/10 rounded-xl px-3 py-2 text-right">
+          <div className="text-[10px] text-white/50 mb-0.5">💵 كاش (اضغط لإضافة/عرض السجل)</div>
+          <div className="text-sm font-bold num">{fmt(cashTotal)} {currency}</div>
+        </button>
+        <button onClick={onOpenNetworkLog} className="flex-1 bg-white/10 rounded-xl px-3 py-2 text-right">
+          <div className="text-[10px] text-white/50 mb-0.5">💳 شبكة (اضغط لإضافة/عرض السجل)</div>
+          <div className="text-sm font-bold num">{fmt(networkTotal)} {currency}</div>
+        </button>
       </div>
+      <button onClick={onOpenSafeLog} className="w-full bg-white/10 rounded-xl px-3 py-2 text-right">
+        <div className="text-[10px] text-white/50 mb-0.5">🔒 الخزنة (اضغط لتحويل مبلغ أو عرض السجل)</div>
+        <div className="text-sm font-bold num">{fmt(safeTotal)} {currency}</div>
+      </button>
     </div>
   );
 }
 
-function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx }) {
+function LedgerLogModal({ title: modalTitle, log, currency, total, categories, suppliers, employees, partners, onClose, onAdd, onDeduct, onDelete }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [type, setType] = useState("add");
+  const [notes, setNotes] = useState("");
+  const [purpose, setPurpose] = useState("none");
+  const [category, setCategory] = useState("");
+  const [title, setTitle] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+  const [partnerId, setPartnerId] = useState("");
+  const [person, setPerson] = useState("");
+  const [err, setErr] = useState("");
+
+  function resetPurposeFields() { setPurpose("none"); setCategory(""); setTitle(""); setSupplierId(""); setEmployeeId(""); setPartnerId(""); setPerson(""); }
+
+  function save() {
+    const v = Number(amount);
+    if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+
+    if (type === "add") {
+      onAdd({ type: "add", amount: v, date, notes: notes.trim() });
+    } else {
+      if (purpose === "expense" && !title.trim()) return setErr("اسم المصروف مطلوب");
+      if (purpose === "supplier" && !supplierId) return setErr("اختر المندوب");
+      if (purpose === "employee" && !employeeId) return setErr("اختر الموظف");
+      if (purpose === "withdraw" && !partnerId && !person.trim()) return setErr("حدد اسم الشخص أو اختر شريك");
+      onDeduct({ purpose, amount: v, date, notes: notes.trim(), category, title: title.trim(), supplierId, employeeId, partnerId, person: person.trim() });
+    }
+    setAmount(""); setNotes(""); setErr(""); resetPurposeFields();
+  }
+
+  return (
+    <Sheet onClose={onClose} title={modalTitle}>
+      <div className="bg-slate-50 rounded-xl p-3 mb-4 flex items-center justify-between">
+        <span className="text-xs text-slate-500">الإجمالي الحالي</span>
+        <span className="text-lg font-bold num">{fmt(total)} {currency}</span>
+      </div>
+
+      <div className="mb-4">
+        <div className="text-xs text-slate-400 mb-1.5">إضافة قيد جديد</div>
+        <div className="flex gap-2 mb-2">
+          <button onClick={() => { setType("add"); resetPurposeFields(); }} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${type === "add" ? "bg-emerald-500 text-white border-emerald-500" : "border-slate-200 text-slate-600"}`}>＋ إضافة مبلغ</button>
+          <button onClick={() => setType("deduct")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${type === "deduct" ? "bg-red-500 text-white border-red-500" : "border-slate-200 text-slate-600"}`}>− خصم مبلغ</button>
+        </div>
+
+        {type === "deduct" && (
+          <div className="mb-2">
+            <div className="text-[11px] text-slate-400 mb-1">هذا الخصم مقابل:</div>
+            <select value={purpose} onChange={e => setPurpose(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+              <option value="none">بدون ربط (خصم عام فقط)</option>
+              <option value="expense">مصروف (يسجل بدفتر العمليات)</option>
+              {suppliers.length > 0 && <option value="supplier">تسديد لمندوب</option>}
+              {employees.length > 0 && <option value="employee">دفعة راتب موظف</option>}
+              <option value="withdraw">سحب شخصي</option>
+            </select>
+
+            {purpose === "expense" && (
+              <>
+                <input value={title} onChange={e => setTitle(e.target.value)} placeholder="اسم المصروف" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />
+                <select value={category} onChange={e => setCategory(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none mb-2">
+                  <option value="">بدون تصنيف</option>
+                  {categories.expense.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </>
+            )}
+            {purpose === "supplier" && (
+              <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+                <option value="">اختر مندوب</option>
+                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            )}
+            {purpose === "employee" && (
+              <select value={employeeId} onChange={e => setEmployeeId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+                <option value="">اختر موظف</option>
+                {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+              </select>
+            )}
+            {purpose === "withdraw" && (
+              <>
+                {partners.length > 0 && (
+                  <select value={partnerId} onChange={e => { setPartnerId(e.target.value); setPerson(""); }} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+                    <option value="">اختر شريك أو اكتب اسم بالأسفل</option>
+                    {partners.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                )}
+                {!partnerId && <input value={person} onChange={e => setPerson(e.target.value)} placeholder="اسم الشخص" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />}
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-2">
+          <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder={`المبلغ (${currency})`} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" />
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
+        </div>
+        <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />
+        {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+        <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold">حفظ القيد</button>
+      </div>
+
+      <div className="text-xs text-slate-400 mb-1.5">السجل ({log.length})</div>
+      {log.length === 0 ? (
+        <div className="text-center text-slate-400 text-xs py-6">لا توجد قيود بعد</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {log.map(e => {
+            const meta = LEDGER_KIND_META[e.kind] || LEDGER_KIND_META.manual;
+            return (
+              <div key={e.id} className="flex items-center justify-between py-2.5 gap-2">
+                <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm" style={{ background: meta.color + "1A" }}>{meta.icon}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium truncate">{e.notes || meta.label}</div>
+                  <div className="text-[10px] text-slate-400">{e.date} · {meta.label}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`text-xs font-bold num ${e.type === "deduct" ? "text-red-500" : "text-emerald-600"}`}>{e.type === "deduct" ? "-" : "+"}{fmt(e.amount)}</span>
+                  <button onClick={() => onDelete(e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+function SafeLogModal({ log, currency, total, cashTotal, networkTotal, onClose, onTransfer, onWithdraw, onDelete }) {
+  const [mode, setMode] = useState("in"); // in = تحويل للخزنة, out = سحب منها
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [source, setSource] = useState("cash");
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState("");
+
+  function save() {
+    const v = Number(amount);
+    if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+    if (mode === "in") onTransfer({ amount: v, date, source, notes: notes.trim() });
+    else onWithdraw({ amount: v, date, notes: notes.trim() });
+    setAmount(""); setNotes(""); setErr("");
+  }
+
+  return (
+    <Sheet onClose={onClose} title="الخزنة">
+      <div className="bg-slate-50 rounded-xl p-3 mb-4 flex items-center justify-between">
+        <span className="text-xs text-slate-500">إجمالي الخزنة الحالي</span>
+        <span className="text-lg font-bold num">{fmt(total)} {currency}</span>
+      </div>
+
+      <div className="flex gap-2 mb-3">
+        <button onClick={() => setMode("in")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "in" ? "bg-emerald-500 text-white border-emerald-500" : "border-slate-200 text-slate-600"}`}>＋ تحويل للخزنة</button>
+        <button onClick={() => setMode("out")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${mode === "out" ? "bg-red-500 text-white border-red-500" : "border-slate-200 text-slate-600"}`}>− سحب من الخزنة</button>
+      </div>
+
+      {mode === "in" && (
+        <div className="mb-2">
+          <div className="text-[11px] text-slate-400 mb-1">من وين تحول؟</div>
+          <div className="flex gap-2">
+            <button onClick={() => setSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${source === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 من الكاش ({fmt(cashTotal)})</button>
+            <button onClick={() => setSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${source === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 من الشبكة ({fmt(networkTotal)})</button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-2 mb-2">
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder={`المبلغ (${currency})`} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" />
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="flex-1 bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
+      </div>
+      <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2" />
+      {mode === "in" && <div className="text-[11px] text-slate-400 mb-2">بينخصم هذا المبلغ تلقائيًا من {source === "cash" ? "الكاش" : "سجل الشبكة"}.</div>}
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-sm font-semibold mb-4">حفظ</button>
+
+      <div className="text-xs text-slate-400 mb-1.5">السجل ({log.length})</div>
+      {log.length === 0 ? (
+        <div className="text-center text-slate-400 text-xs py-6">لا توجد قيود بعد</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {log.map(e => (
+            <div key={e.id} className="flex items-center justify-between py-2">
+              <div>
+                <div className="text-xs font-medium">
+                  {e.date}
+                  {e.type === "add" && e.source ? ` · من ${e.source === "cash" ? "الكاش" : "الشبكة"}` : ""}
+                  {e.notes ? " · " + e.notes : ""}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs font-bold num ${e.type === "deduct" ? "text-red-500" : "text-emerald-600"}`}>{e.type === "deduct" ? "-" : "+"}{fmt(e.amount)}</span>
+                <button onClick={() => onDelete(e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickDaily }) {
   const mt = monthTotals(curMonth);
   const recent = data.transactions.slice(0, 6);
   return (
     <div className="space-y-4">
+      <button onClick={onOpenQuickDaily} className="w-full bg-[#12213B] text-white rounded-2xl p-4 flex items-center justify-between shadow-sm">
+        <div className="text-right">
+          <div className="font-semibold text-sm">📝 إدخال يومية سريعة</div>
+          <div className="text-[11px] text-white/60">مبيعات، مصروفات، تسديد مندوب، كاش وشبكة اليوم — بضغطة وحدة</div>
+        </div>
+        <span className="text-xl">›</span>
+      </button>
       <div className="grid grid-cols-2 gap-3">
         <StatCard icon="📈" color="#0f9d6e" label={`إيرادات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.income} currency={data.settings.currency} />
         <StatCard icon="📉" color="#d64545" label={`مصروفات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.expense} currency={data.settings.currency} />
@@ -525,6 +1412,150 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx }) {
         )}
       </div>
     </div>
+  );
+}
+
+function QuickDailyModal({ data, onClose, onSave }) {
+  const [date, setDate] = useState(todayISO());
+  const [salesAmount, setSalesAmount] = useState("");
+  const [salesCategory, setSalesCategory] = useState("");
+  const [salesNotes, setSalesNotes] = useState("");
+  const [expenses, setExpenses] = useState([{ amount: "", category: "", notes: "", paymentSource: "none" }]);
+  const [supplierPayments, setSupplierPayments] = useState([{ supplierId: "", amount: "", paymentSource: "none" }]);
+  const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "", paymentSource: "none" }]);
+  const [cashToday, setCashToday] = useState("");
+  const [networkToday, setNetworkToday] = useState("");
+  const [err, setErr] = useState("");
+
+  function updateExpense(idx, patch) { setExpenses(expenses.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
+  function addExpenseRow() { setExpenses([...expenses, { amount: "", category: "", notes: "", paymentSource: "none" }]); }
+  function removeExpenseRow(idx) { setExpenses(expenses.filter((_, i) => i !== idx)); }
+
+  function updateSupplier(idx, patch) { setSupplierPayments(supplierPayments.map((s, i) => i === idx ? { ...s, ...patch } : s)); }
+  function addSupplierRow() { setSupplierPayments([...supplierPayments, { supplierId: "", amount: "", paymentSource: "none" }]); }
+  function removeSupplierRow(idx) { setSupplierPayments(supplierPayments.filter((_, i) => i !== idx)); }
+
+  function updateEmployee(idx, patch) { setEmployeePayments(employeePayments.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
+  function addEmployeeRow() { setEmployeePayments([...employeePayments, { employeeId: "", amount: "", paymentSource: "none" }]); }
+  function removeEmployeeRow(idx) { setEmployeePayments(employeePayments.filter((_, i) => i !== idx)); }
+
+  function save() {
+    if (!date) return setErr("التاريخ مطلوب");
+    const validExpenses = expenses.filter(e => Number(e.amount) > 0);
+    const validSuppliers = supplierPayments.filter(s => s.supplierId && Number(s.amount) > 0);
+    const validEmployees = employeePayments.filter(e => e.employeeId && Number(e.amount) > 0);
+    const hasAny = Number(salesAmount) > 0 || validExpenses.length > 0 || validSuppliers.length > 0 || validEmployees.length > 0 || Number(networkToday) > 0 || (cashToday !== "" && cashToday != null);
+    if (!hasAny) return setErr("عبّي خانة وحدة على الأقل");
+    onSave({
+      date, salesAmount, salesCategory, salesNotes, salesTitle: `مبيعات يوم ${date}`,
+      expenses: validExpenses, supplierPayments: validSuppliers, employeePayments: validEmployees, cashToday, networkToday,
+    });
+  }
+
+  return (
+    <Sheet onClose={onClose} title="يومية سريعة">
+      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+
+      <div className="bg-emerald-50 rounded-xl p-3 mb-3">
+        <div className="text-xs font-semibold text-emerald-700 mb-2">📈 مبلغ المبيعات (يسجل كإيراد)</div>
+        <input type="number" value={salesAmount} onChange={e => setSalesAmount(e.target.value)} placeholder={`المبلغ (${data.settings.currency})`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num mb-2" />
+        <select value={salesCategory} onChange={e => setSalesCategory(e.target.value)} className="w-full bg-white rounded-xl py-2 px-2 text-xs outline-none mb-2">
+          <option value="">بدون تصنيف</option>
+          {data.categories.income.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input value={salesNotes} onChange={e => setSalesNotes(e.target.value)} placeholder="ملاحظات (اختياري)" className="w-full bg-white rounded-xl py-2 px-3 text-xs outline-none" />
+      </div>
+
+      <div className="bg-red-50 rounded-xl p-3 mb-3">
+        <div className="text-xs font-semibold text-red-600 mb-2">📉 المصروفات (كل واحد يتسجل مصروف مستقل)</div>
+        <div className="space-y-2">
+          {expenses.map((exp, idx) => (
+            <div key={idx} className="bg-white rounded-xl p-2 space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <input type="number" value={exp.amount} onChange={e => updateExpense(idx, { amount: e.target.value })} placeholder={`المبلغ (${data.settings.currency})`} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
+                <select value={exp.category} onChange={e => updateExpense(idx, { category: e.target.value })} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none">
+                  <option value="">بدون تصنيف</option>
+                  {data.categories.expense.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                {expenses.length > 1 && <button onClick={() => removeExpenseRow(idx)} className="text-red-400 px-1">✕</button>}
+              </div>
+              <input value={exp.notes} onChange={e => updateExpense(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
+              <div className="flex gap-1">
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
+                <button type="button" onClick={() => updateExpense(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${exp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={addExpenseRow} className="text-xs text-red-500 mt-2">＋ إضافة مصروف آخر</button>
+      </div>
+
+      {data.suppliers.length > 0 && (
+        <div className="bg-amber-50 rounded-xl p-3 mb-3">
+          <div className="text-xs font-semibold text-amber-700 mb-2">🚚 تسديد لأكثر من مندوب (اختياري — يخصم من ديونهم تلقائي)</div>
+          <div className="space-y-2">
+            {supplierPayments.map((sp, idx) => (
+              <div key={idx} className="bg-white rounded-lg p-2 space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <select value={sp.supplierId} onChange={e => updateSupplier(idx, { supplierId: e.target.value })} className="flex-[1.3] bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none">
+                    <option value="">اختر مندوب</option>
+                    {data.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <input type="number" value={sp.amount} onChange={e => updateSupplier(idx, { amount: e.target.value })} placeholder={`المبلغ`} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
+                  {supplierPayments.length > 1 && <button onClick={() => removeSupplierRow(idx)} className="text-red-400 px-1">✕</button>}
+                </div>
+                <div className="flex gap-1">
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
+                  <button type="button" onClick={() => updateSupplier(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${sp.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button onClick={addSupplierRow} className="text-xs text-amber-700 mt-2">＋ إضافة مندوب آخر</button>
+        </div>
+      )}
+
+      {data.employees.length > 0 && (
+        <div className="bg-blue-50 rounded-xl p-3 mb-3">
+          <div className="text-xs font-semibold text-blue-700 mb-2">🧑‍🔧 دفعات رواتب لأكثر من موظف (اختياري)</div>
+          <div className="space-y-2">
+            {employeePayments.map((ep, idx) => (
+              <div key={idx} className="bg-white rounded-lg p-2 space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <select value={ep.employeeId} onChange={e => updateEmployee(idx, { employeeId: e.target.value })} className="flex-[1.3] bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none">
+                    <option value="">اختر موظف</option>
+                    {data.employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+                  </select>
+                  <input type="number" value={ep.amount} onChange={e => updateEmployee(idx, { amount: e.target.value })} placeholder="المبلغ" className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
+                  {employeePayments.length > 1 && <button onClick={() => removeEmployeeRow(idx)} className="text-red-400 px-1">✕</button>}
+                </div>
+                <div className="flex gap-1">
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "none" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>بدون</button>
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "cash" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💵 كاش</button>
+                  <button type="button" onClick={() => updateEmployee(idx, { paymentSource: "network" })} className={`flex-1 text-[10px] py-1.5 rounded-lg border ${ep.paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-500"}`}>💳 شبكة</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button onClick={addEmployeeRow} className="text-xs text-blue-700 mt-2">＋ إضافة موظف آخر</button>
+        </div>
+      )}
+
+      <div className="bg-slate-50 rounded-xl p-3 mb-3">
+        <div className="text-xs font-semibold text-slate-600 mb-2">💵 كاش اليوم (يحدّث رقم الكاش مباشرة)</div>
+        <input type="number" value={cashToday} onChange={e => setCashToday(e.target.value)} placeholder={`اتركه فاضي لو ما تبي تحدثه`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num" />
+      </div>
+
+      <div className="bg-slate-50 rounded-xl p-3 mb-3">
+        <div className="text-xs font-semibold text-slate-600 mb-2">💳 شبكة اليوم (يضيف قيد جديد بالسجل)</div>
+        <input type="number" value={networkToday} onChange={e => setNetworkToday(e.target.value)} placeholder={`المبلغ اللي دخل شبكة اليوم`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num" />
+      </div>
+
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ يومية اليوم</button>
+    </Sheet>
   );
 }
 
@@ -819,6 +1850,12 @@ function Partners({ data, totals, onSave, onDelete }) {
   const totalPct = data.partners.reduce((s, p) => s + Number(p.percentage || 0), 0);
   const baseAmount = splitBase === "net" ? totals.netProfit : Number(customAmount || 0);
 
+  function withdrawnBy(partner) {
+    return data.transactions.filter(t => t.type === "withdraw" && (
+      t.partnerId ? t.partnerId === partner.id : (t.person || "").trim().toLowerCase() === partner.name.trim().toLowerCase()
+    )).reduce((s, t) => s + t.amount, 0);
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -829,15 +1866,23 @@ function Partners({ data, totals, onSave, onDelete }) {
         <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد شركاء مضافون بعد</div>
       ) : (
         <div className="space-y-2">
-          {data.partners.map(p => (
-            <div key={p.id} className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 flex items-center justify-between">
-              <div><div className="font-semibold text-sm">{p.name}</div><div className="text-xs text-slate-400">{p.percentage ? `${p.percentage}%` : "نسبة غير محددة"}{p.notes ? " · " + p.notes : ""}</div></div>
-              <div className="flex items-center gap-1">
-                <button onClick={() => setForm(p)} className="p-2 text-slate-400 hover:text-slate-700">✎</button>
-                <button onClick={() => onDelete(p.id)} className="p-2 text-slate-400 hover:text-red-500">🗑</button>
+          {data.partners.map(p => {
+            const withdrawn = withdrawnBy(p);
+            return (
+              <div key={p.id} className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+                <div className="flex items-center justify-between">
+                  <div><div className="font-semibold text-sm">{p.name}</div><div className="text-xs text-slate-400">{p.percentage ? `${p.percentage}%` : "نسبة غير محددة"}{p.notes ? " · " + p.notes : ""}</div></div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setForm(p)} className="p-2 text-slate-400 hover:text-slate-700">✎</button>
+                    <button onClick={() => onDelete(p.id)} className="p-2 text-slate-400 hover:text-red-500">🗑</button>
+                  </div>
+                </div>
+                {withdrawn > 0 && (
+                  <div className="text-[11px] text-amber-600 mt-1.5">سحب حتى الآن: <span className="font-bold num">{fmt(withdrawn)}</span> {data.settings.currency}</div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
           {totalPct > 0 && (
             <div className={`text-xs rounded-xl px-3 py-2 ${totalPct === 100 ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-700"}`}>
               مجموع النسب الحالي: {totalPct}% {totalPct !== 100 && "— يجب أن يكون المجموع 100% لاحتساب التقسيم بدقة"}
@@ -855,12 +1900,25 @@ function Partners({ data, totals, onSave, onDelete }) {
           {splitBase === "custom" && <input type="number" value={customAmount} onChange={e => setCustomAmount(e.target.value)} placeholder="أدخل المبلغ" className="w-full bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none" />}
           <div className="text-xs text-slate-400">المبلغ المستخدم للتقسيم: <span className="font-semibold num text-slate-700">{fmt(baseAmount)} {data.settings.currency}</span></div>
           <div className="divide-y divide-slate-100">
-            {data.partners.map(p => (
-              <div key={p.id} className="flex items-center justify-between py-2 text-sm">
-                <span>{p.name} <span className="text-slate-400 text-xs">({p.percentage || 0}%)</span></span>
-                <span className="font-bold num">{fmt(baseAmount * (Number(p.percentage || 0) / 100))} {data.settings.currency}</span>
-              </div>
-            ))}
+            {data.partners.map(p => {
+              const share = baseAmount * (Number(p.percentage || 0) / 100);
+              const withdrawn = withdrawnBy(p);
+              const remaining = share - withdrawn;
+              return (
+                <div key={p.id} className="py-2">
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span>{p.name} <span className="text-slate-400 text-xs">({p.percentage || 0}%)</span></span>
+                    <span className="font-bold num">{fmt(share)} {data.settings.currency}</span>
+                  </div>
+                  {withdrawn > 0 && (
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>ناقص سحوباته ({fmt(withdrawn)}) → المتبقي له</span>
+                      <span className={`font-bold num ${remaining >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt(remaining)} {data.settings.currency}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1160,7 +2218,7 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
                     ) : s.entries.map(e => (
                       <div key={e.id} className="flex items-center justify-between px-3 py-2">
                         <div>
-                          <div className="text-xs font-medium">{e.type === "debt" ? "دين جديد" : "تسديد"} {e.notes ? "· " + e.notes : ""}</div>
+                          <div className="text-xs font-medium">{e.type === "debt" ? "دين جديد" : e.type === "return" ? "رجيع" : "تسديد"} {e.notes ? "· " + e.notes : ""}</div>
                           <div className="text-[10px] text-slate-400">{e.date}</div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1214,20 +2272,33 @@ function SupplierEntryModal({ supplier, type, currency, onClose, onSave }) {
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
   const [notes, setNotes] = useState("");
+  const [paymentSource, setPaymentSource] = useState("none");
   const [err, setErr] = useState("");
   const isPayment = type === "payment";
   function save() {
     const v = Number(amount);
     if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
     if (!date) return setErr("التاريخ مطلوب");
-    onSave({ type, amount: v, date, notes: notes.trim() });
+    onSave({ type, amount: v, date, notes: notes.trim(), paymentSource: isPayment ? paymentSource : "none" });
   }
   return (
     <Sheet onClose={onClose} title={`${isPayment ? "تسديد دفعة لـ" : "دين جديد على"} ${supplier.name}`}>
       <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
       <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="ملاحظات (مثل: أسماء القطع)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
-      {isPayment && <div className="text-[11px] text-slate-400 mb-2">بيتسجل هذا المبلغ تلقائيًا كمصروف في دفتر العمليات.</div>}
+      {isPayment && (
+        <>
+          <div className="mb-2">
+            <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري)</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+              <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+              <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-400 mb-2">بيتسجل هذا المبلغ تلقائيًا كمصروف في دفتر العمليات.</div>
+        </>
+      )}
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
       <button onClick={save} className={`w-full text-white rounded-xl py-3 text-sm font-semibold ${isPayment ? "bg-emerald-500" : "bg-red-500"}`}>{isPayment ? "حفظ التسديد" : "حفظ الدين"}</button>
     </Sheet>
@@ -1336,12 +2407,493 @@ function DailyClosing({ data, totals, onSaveClosing, exportDayCSV }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory }) {
+function Inventory({ data, onSave, onDelete, onAdjust }) {
+  const [form, setForm] = useState(null);
+  const [q, setQ] = useState("");
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const filtered = useMemo(() => data.inventory.filter(i => !q || i.name.toLowerCase().includes(q.toLowerCase())), [data.inventory, q]);
+  const totalValue = data.inventory.reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unitCost || 0), 0);
+  const lowStockCount = data.inventory.filter(i => Number(i.minQty || 0) > 0 && Number(i.quantity || 0) <= Number(i.minQty)).length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">جرد المخزون</div>
+        <button onClick={() => setForm({ name: "", category: "", quantity: "", unitCost: "", unitPrice: "", minQty: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة صنف</button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+          <div className="text-[11px] text-slate-400 mb-1">قيمة المخزون الحالية</div>
+          <div className="text-lg font-bold num">{fmt(totalValue)} {data.settings.currency}</div>
+        </div>
+        <div className="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100">
+          <div className="text-[11px] text-slate-400 mb-1">أصناف وشك تخلص</div>
+          <div className={`text-lg font-bold num ${lowStockCount > 0 ? "text-red-500" : "text-slate-800"}`}>{lowStockCount}</div>
+        </div>
+      </div>
+
+      <div className="relative">
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔍</span>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="ابحث عن صنف..." className="w-full bg-white border border-slate-200 rounded-xl py-2.5 pr-9 pl-3 text-sm outline-none" />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا توجد أصناف مطابقة</div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map(i => (
+            <InventoryCard key={i.id} i={i} currency={data.settings.currency} onEdit={() => setForm(i)} onDelete={() => setConfirmDel(i)} onAdjust={(d) => onAdjust(i.id, d)} />
+          ))}
+        </div>
+      )}
+
+      {form && <InventoryModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
+      {confirmDel && (
+        <ConfirmModal title="حذف الصنف" message={`هل تريد حذف "${confirmDel.name}" من المخزون نهائيًا؟`} onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
+      )}
+    </div>
+  );
+}
+
+function InventoryCard({ i, currency, onEdit, onDelete, onAdjust }) {
+  const [amount, setAmount] = useState("");
+  const low = Number(i.minQty || 0) > 0 && Number(i.quantity || 0) <= Number(i.minQty);
+  function apply(sign) { const v = Number(amount); if (!v || v <= 0) return; onAdjust(sign * v); setAmount(""); }
+
+  return (
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+      <div className="flex items-start justify-between mb-2">
+        <div>
+          <div className="font-semibold text-sm flex items-center gap-2">{i.name}{low && <span className="text-[10px] bg-red-50 text-red-500 px-2 py-0.5 rounded-full">وشك يخلص</span>}</div>
+          {i.category && <div className="text-[11px] text-slate-400">{i.category}</div>}
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={onEdit} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>
+          <button onClick={onDelete} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+        </div>
+      </div>
+      <div className="flex items-center justify-between text-xs text-slate-500 mb-3">
+        <span>الكمية الحالية: <span className="font-bold num text-slate-800">{fmt(i.quantity)}</span></span>
+        <span>سعر التكلفة: <span className="font-bold num text-slate-800">{fmt(i.unitCost)}</span> {currency}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="الكمية" className="flex-1 bg-slate-50 rounded-xl py-2 px-3 text-sm outline-none num" />
+        <button onClick={() => apply(1)} className="w-9 h-9 shrink-0 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">＋</button>
+        <button onClick={() => apply(-1)} className="w-9 h-9 shrink-0 rounded-xl bg-red-50 text-red-500 flex items-center justify-center font-bold">−</button>
+      </div>
+    </div>
+  );
+}
+
+function InventoryModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [category, setCategory] = useState(initial.category || "");
+  const [quantity, setQuantity] = useState(initial.quantity ?? "");
+  const [unitCost, setUnitCost] = useState(initial.unitCost ?? "");
+  const [unitPrice, setUnitPrice] = useState(initial.unitPrice ?? "");
+  const [minQty, setMinQty] = useState(initial.minQty ?? "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [err, setErr] = useState("");
+
+  function save() {
+    if (!name.trim()) return setErr("اسم الصنف مطلوب");
+    onSave({ id: initial.id, name: name.trim(), category: category.trim(), quantity: Number(quantity || 0), unitCost: Number(unitCost || 0), unitPrice: Number(unitPrice || 0), minQty: Number(minQty || 0), notes: notes.trim() });
+  }
+
+  return (
+    <Sheet onClose={onClose} title={initial.id ? "تعديل صنف" : "إضافة صنف للمخزون"}>
+      <Field label="اسم الصنف"><input value={name} onChange={e => setName(e.target.value)} placeholder="مثال: شاشة آيفون 13" className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="التصنيف (اختياري)"><input value={category} onChange={e => setCategory(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="الكمية الحالية"><input type="number" value={quantity} onChange={e => setQuantity(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+        <Field label="حد التنبيه (اختياري)"><input type="number" value={minQty} onChange={e => setMinQty(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="سعر التكلفة"><input type="number" value={unitCost} onChange={e => setUnitCost(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+        <Field label="سعر البيع (اختياري)"><input type="number" value={unitPrice} onChange={e => setUnitPrice(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      </div>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
+  );
+}
+
+function PurchaseInvoices({ data, onCreate, onDelete, onAddReturn, onDeleteReturn }) {
+  const [open, setOpen] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [returnFor, setReturnFor] = useState(null);
+  const [confirmDelReturn, setConfirmDelReturn] = useState(null);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">فواتير المشتريات</div>
+        <button onClick={() => setOpen(true)} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ فاتورة جديدة</button>
+      </div>
+      <div className="text-xs text-slate-400 -mt-2">سجّل فاتورة مشتريات وراح تتحدّث كميات المخزون تلقائيًا، وتتسجل كمصروف نقدي أو دين على المورد.</div>
+
+      {data.purchaseInvoices.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا توجد فواتير مسجلة بعد</div>
+      ) : (
+        <div className="space-y-3">
+          {data.purchaseInvoices.map(inv => {
+            const isOpen = expanded === inv.id;
+            const returns = inv.returns || [];
+            const totalReturned = returns.reduce((s, r) => s + r.total, 0);
+            return (
+              <div key={inv.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <button onClick={() => setExpanded(isOpen ? null : inv.id)} className="w-full flex items-start justify-between">
+                  <div className="text-right">
+                    <div className="font-semibold text-sm">فاتورة #{inv.invoiceNo}{inv.supplierName ? " — " + inv.supplierName : ""}</div>
+                    <div className="text-[11px] text-slate-400">{inv.date} · {inv.items.length} صنف · {inv.paymentType === "cash" ? "نقدي" : "على الحساب"}{returns.length > 0 ? ` · رجيع: ${fmt(totalReturned)}` : ""}</div>
+                  </div>
+                  <div className="text-sm font-bold num">{fmt(inv.total)} {data.settings.currency}</div>
+                </button>
+                {isOpen && (
+                  <div className="mt-3 pt-3 border-t border-slate-100">
+                    <div className="divide-y divide-slate-100 mb-3">
+                      {inv.items.map((it, idx) => (
+                        <div key={idx} className="flex items-center justify-between py-1.5 text-xs">
+                          <span>{it.name} × {it.qty}</span>
+                          <span className="font-semibold num">{fmt(it.lineTotal)} {data.settings.currency}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {returns.length > 0 && (
+                      <div className="bg-amber-50 rounded-xl p-2 mb-3">
+                        <div className="text-[11px] font-semibold text-amber-700 mb-1.5">سجل الرجيع</div>
+                        <div className="divide-y divide-amber-100">
+                          {returns.map(r => (
+                            <div key={r.id} className="flex items-center justify-between py-1.5 text-xs">
+                              <span>{r.date} · {r.items.map(it => `${it.name}×${it.qty}`).join("، ")}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold num text-amber-700">-{fmt(r.total)}</span>
+                                <button onClick={() => setConfirmDelReturn({ invoiceId: inv.id, returnId: r.id, label: r.date })} className="text-amber-400 hover:text-red-500">🗑</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 mb-2">
+                      <button onClick={() => setReturnFor(inv)} className="flex-1 bg-amber-50 text-amber-700 rounded-xl py-2 text-xs font-semibold">↩ تسجيل رجيع</button>
+                      <button onClick={() => setConfirmDel(inv)} className="px-3 bg-red-50 rounded-xl text-red-500 text-xs">🗑</button>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => {
+                        const text = buildInvoiceText(data.settings.shopName, inv, data.settings.currency);
+                        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+                        else window.prompt("انسخ النص:", text);
+                      }} className="flex-1 bg-slate-50 rounded-xl py-2 text-xs font-semibold text-slate-600">📋 نسخ كنص</button>
+                      <button onClick={() => printInvoice(data.settings.shopName, inv, data.settings.currency)} className="flex-1 bg-slate-50 rounded-xl py-2 text-xs font-semibold text-slate-600">🖨 تنزيل كمستند</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {open && <InvoiceModal data={data} onClose={() => setOpen(false)} onSave={(payload) => { onCreate(payload); setOpen(false); }} />}
+      {returnFor && (
+        <ReturnModal invoice={returnFor} currency={data.settings.currency} onClose={() => setReturnFor(null)} onSave={(payload) => { onAddReturn(returnFor.id, payload); setReturnFor(null); }} />
+      )}
+      {confirmDel && (
+        <ConfirmModal title="حذف الفاتورة" message="سيتم حذف الفاتورة والمصروف أو الدين المرتبط بها (وأي رجيع مسجل عليها). الكميات المضافة سابقًا للمخزون تبقى كما هي. متابعة؟"
+          onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
+      )}
+      {confirmDelReturn && (
+        <ConfirmModal title="إلغاء الرجيع" message={`سيتم إلغاء رجيع ${confirmDelReturn.label} وإرجاع الكمية للمخزون وحذف العملية المرتبطة به. متابعة؟`}
+          onCancel={() => setConfirmDelReturn(null)} onConfirm={() => { onDeleteReturn(confirmDelReturn.invoiceId, confirmDelReturn.returnId); setConfirmDelReturn(null); }} />
+      )}
+    </div>
+  );
+}
+
+function ReturnModal({ invoice, currency, onClose, onSave }) {
+  const [date, setDate] = useState(todayISO());
+  const [items, setItems] = useState(invoice.items.map(it => ({ name: it.name, maxQty: it.qty, unitCost: it.unitCost, qty: "" })));
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState("");
+
+  function updateItem(idx, patch) { setItems(items.map((it, i) => i === idx ? { ...it, ...patch } : it)); }
+  const total = items.reduce((s, it) => s + (Number(it.qty) || 0) * Number(it.unitCost), 0);
+
+  function save() {
+    const valid = items.filter(it => Number(it.qty) > 0);
+    if (valid.length === 0) return setErr("حدد كمية الرجيع لصنف واحد على الأقل");
+    for (const it of valid) {
+      if (Number(it.qty) > Number(it.maxQty)) return setErr(`كمية الرجيع لـ "${it.name}" أكبر من الكمية المشتراة`);
+    }
+    if (!date) return setErr("التاريخ مطلوب");
+    onSave({ date, items: valid, notes: notes.trim() });
+  }
+
+  return (
+    <Sheet onClose={onClose} title={`تسجيل رجيع — فاتورة #${invoice.invoiceNo}`}>
+      <Field label="تاريخ الرجيع"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <div className="text-xs text-slate-400 mb-1.5">حدد الكمية المرتجعة من كل صنف</div>
+      <div className="space-y-2 mb-3">
+        {items.map((it, idx) => (
+          <div key={idx} className="flex items-center gap-2 bg-slate-50 rounded-xl p-2">
+            <span className="flex-[1.5] text-xs">{it.name} <span className="text-slate-400">(اشتريت {it.maxQty})</span></span>
+            <input type="number" value={it.qty} onChange={e => updateItem(idx, { qty: e.target.value })} placeholder="0" className="flex-1 bg-white rounded-lg py-1.5 px-2 text-xs outline-none num" />
+          </div>
+        ))}
+      </div>
+      <Field label="ملاحظات (سبب الرجيع)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      <div className="text-sm mb-2">إجمالي الرجيع: <span className="font-bold num">{fmt(total)} {currency}</span></div>
+      <div className="text-[11px] text-slate-400 mb-2">
+        {invoice.paymentType === "cash" ? "بيتسجل كإيراد (مرتجع مشتريات) بدفتر العمليات." : "بينخصم من دين المورد المرتبط بهذه الفاتورة (مو تسديد، بل رجيع بضاعة)."}
+      </div>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-amber-500 text-white rounded-xl py-3 text-sm font-semibold">حفظ الرجيع</button>
+    </Sheet>
+  );
+}
+
+function InvoiceModal({ data, onClose, onSave }) {
+  const [supplierId, setSupplierId] = useState("");
+  const [supplierName, setSupplierName] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [paymentType, setPaymentType] = useState("cash");
+  const [notes, setNotes] = useState("");
+  const [items, setItems] = useState([{ name: "", qty: "", unitCost: "" }]);
+  const [err, setErr] = useState("");
+
+  const total = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitCost) || 0), 0);
+
+  function updateItem(idx, patch) { setItems(items.map((it, i) => i === idx ? { ...it, ...patch } : it)); }
+  function addRow() { setItems([...items, { name: "", qty: "", unitCost: "" }]); }
+  function removeRow(idx) { setItems(items.filter((_, i) => i !== idx)); }
+
+  function save() {
+    const validItems = items.filter(it => it.name.trim() && Number(it.qty) > 0);
+    if (validItems.length === 0) return setErr("أضف صنف واحد على الأقل بكمية أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+    if (paymentType === "credit" && !supplierId) return setErr("اختر المورد عشان يتسجل الدين عليه");
+    const supplier = data.suppliers.find(s => s.id === supplierId);
+    onSave({ supplierId: supplierId || null, supplierName: supplier ? supplier.name : supplierName.trim(), date, paymentType, notes: notes.trim(), items: validItems });
+  }
+
+  return (
+    <Sheet onClose={onClose} title="فاتورة مشتريات جديدة">
+      <Field label="المورد (اختياري)">
+        <select value={supplierId} onChange={e => { setSupplierId(e.target.value); setSupplierName(""); }} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none">
+          <option value="">بدون مورد محدد</option>
+          {data.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </Field>
+      {!supplierId && (
+        <Field label="اسم المورد (نص حر، اختياري)"><input value={supplierName} onChange={e => setSupplierName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      )}
+      <Field label="تاريخ الفاتورة"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+
+      <div className="text-xs text-slate-400 mb-1.5">الأصناف</div>
+      <div className="space-y-2 mb-2">
+        {items.map((it, idx) => (
+          <div key={idx} className="flex items-center gap-1.5">
+            <input value={it.name} onChange={e => updateItem(idx, { name: e.target.value })} placeholder="اسم الصنف" list="inv-items" className="flex-[2] bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none" />
+            <input type="number" value={it.qty} onChange={e => updateItem(idx, { qty: e.target.value })} placeholder="الكمية" className="flex-1 bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none num" />
+            <input type="number" value={it.unitCost} onChange={e => updateItem(idx, { unitCost: e.target.value })} placeholder="السعر" className="flex-1 bg-slate-50 rounded-xl py-2 px-2 text-xs outline-none num" />
+            {items.length > 1 && <button onClick={() => removeRow(idx)} className="text-red-400 px-1">✕</button>}
+          </div>
+        ))}
+        <datalist id="inv-items">{data.inventory.map(i => <option key={i.id} value={i.name} />)}</datalist>
+      </div>
+      <button onClick={addRow} className="text-xs text-slate-500 mb-3">＋ إضافة صنف آخر</button>
+
+      <Field label="طريقة الدفع">
+        <div className="flex gap-2">
+          <button onClick={() => setPaymentType("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentType === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>نقدي (يسجل كمصروف)</button>
+          <button onClick={() => setPaymentType("credit")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentType === "credit" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>على الحساب (دين على المورد)</button>
+        </div>
+      </Field>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+
+      <div className="text-sm mb-2">الإجمالي: <span className="font-bold num">{fmt(total)} {data.settings.currency}</span></div>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ الفاتورة</button>
+    </Sheet>
+  );
+}
+
+function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment }) {
+  const [form, setForm] = useState(null);
+  const [payFor, setPayFor] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const curMonth = todayISO().slice(0, 7);
+
+  function paidThisMonth(emp) {
+    return emp.entries.filter(e => e.date.slice(0, 7) === curMonth).reduce((s, e) => s + e.amount, 0);
+  }
+
+  const totalRemaining = data.employees.reduce((s, e) => s + Math.max(0, Number(e.monthlySalary || 0) - paidThisMonth(e)), 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="font-bold text-lg">الموظفين</div>
+        <button onClick={() => setForm({ name: "", phone: "", monthlySalary: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة موظف</button>
+      </div>
+
+      {data.employees.length > 0 && (
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
+          <div>
+            <div className="text-xs text-slate-400 mb-1">إجمالي المتبقي لكل الموظفين هذا الشهر</div>
+            <div className="text-lg font-bold num">{fmt(totalRemaining)} {data.settings.currency}</div>
+          </div>
+          <span className="text-2xl">🧑‍🔧</span>
+        </div>
+      )}
+
+      {data.employees.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد موظفين مضافين بعد</div>
+      ) : (
+        <div className="space-y-3">
+          {data.employees.map(emp => {
+            const paid = paidThisMonth(emp);
+            const salary = Number(emp.monthlySalary || 0);
+            const remaining = salary - paid;
+            const pct = salary > 0 ? Math.min(100, Math.round((paid / salary) * 100)) : 0;
+            const open = expanded === emp.id;
+            return (
+              <div key={emp.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <div className="flex items-start justify-between mb-2">
+                  <div>
+                    <div className="font-semibold text-sm">{emp.name}</div>
+                    <div className="text-[11px] text-slate-400">{emp.phone}{emp.notes ? " · " + emp.notes : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setForm(emp)} className="p-1.5 text-slate-400 hover:text-slate-700">✎</button>
+                    <button onClick={() => setConfirmDel(emp)} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+                  </div>
+                </div>
+
+                <div className="text-xs text-slate-500 mb-1.5">
+                  أخذ <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} هذا الشهر
+                </div>
+                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
+                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#0f9d6e" : "#3B82F6" }} />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
+                  <span>{pct}%</span>
+                  <span className={remaining < 0 ? "text-red-500 font-semibold" : ""}>{remaining >= 0 ? `باقي له ${fmt(remaining)} ${data.settings.currency}` : `أخذ زيادة ${fmt(-remaining)} ${data.settings.currency}`}</span>
+                </div>
+
+                <button onClick={() => setPayFor(emp)} className="w-full bg-slate-800 text-white rounded-xl py-2 text-xs font-semibold mb-2">＋ تسجيل دفعة من الراتب</button>
+                <button onClick={() => setExpanded(open ? null : emp.id)} className="text-[11px] text-slate-400">{open ? "إخفاء سجل الدفعات ▲" : "عرض سجل الدفعات ▼"}</button>
+                {open && (
+                  <div className="mt-2 divide-y divide-slate-100 bg-slate-50 rounded-xl">
+                    {emp.entries.length === 0 ? (
+                      <div className="text-center text-slate-400 text-xs py-4">لا توجد دفعات مسجلة بعد</div>
+                    ) : emp.entries.map(e => (
+                      <div key={e.id} className="flex items-center justify-between px-3 py-2">
+                        <div>
+                          <div className="text-xs font-medium">{e.date}{e.notes ? " · " + e.notes : ""}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold num text-slate-700">{fmt(e.amount)}</span>
+                          <button onClick={() => onDeletePayment(emp.id, e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {form && <EmployeeModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
+      {payFor && (
+        <EmployeePaymentModal employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
+      )}
+      {confirmDel && (
+        <ConfirmModal title="حذف الموظف" message={`سيتم حذف "${confirmDel.name}" وكل سجل دفعاته من دفتر العمليات. متابعة؟`}
+          onCancel={() => setConfirmDel(null)} onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null); }} />
+      )}
+    </div>
+  );
+}
+
+function EmployeeModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || "");
+  const [phone, setPhone] = useState(initial.phone || "");
+  const [monthlySalary, setMonthlySalary] = useState(initial.monthlySalary ?? "");
+  const [notes, setNotes] = useState(initial.notes || "");
+  const [err, setErr] = useState("");
+  function save() {
+    if (!name.trim()) return setErr("اسم الموظف مطلوب");
+    onSave({ id: initial.id, name: name.trim(), phone: phone.trim(), monthlySalary: Number(monthlySalary || 0), notes: notes.trim() });
+  }
+  return (
+    <Sheet onClose={onClose} title={initial.id ? "تعديل موظف" : "إضافة موظف"}>
+      <Field label="اسم الموظف"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="رقم الجوال (اختياري)"><input value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="الراتب الشهري"><input type="number" value={monthlySalary} onChange={e => setMonthlySalary(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
+    </Sheet>
+  );
+}
+
+function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [notes, setNotes] = useState("");
+  const [paymentSource, setPaymentSource] = useState("none");
+  const [err, setErr] = useState("");
+  function save() {
+    const v = Number(amount);
+    if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!date) return setErr("التاريخ مطلوب");
+    onSave({ amount: v, date, notes: notes.trim(), paymentSource });
+  }
+  return (
+    <Sheet onClose={onClose} title={`دفعة راتب — ${employee.name}`}>
+      <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="ملاحظات (اختياري)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
+      <div className="mb-2">
+        <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري)</div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+          <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+          <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-400 mb-2">بتتسجل هذي الدفعة تلقائيًا كمصروف (تصنيف: رواتب) بدفتر العمليات.</div>
+      {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ الدفعة</button>
+    </Sheet>
+  );
+}
+
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
   const [newIncomeCat, setNewIncomeCat] = useState("");
   const [newExpenseCat, setNewExpenseCat] = useState("");
+  const [confirmImport, setConfirmImport] = useState(null);
+  const fileInputRef = useRef(null);
+
+  function handleFilePicked(e) {
+    const file = e.target.files[0];
+    if (file) setConfirmImport(file);
+    e.target.value = "";
+  }
 
   return (
     <div className="space-y-4">
@@ -1351,6 +2903,26 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory 
         <Field label="العملة"><input value={currency} onChange={e => setCurrency(e.target.value)} onBlur={() => onUpdateSettings({ currency })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="الرصيد الابتدائي"><input type="number" value={initialBalance} onChange={e => setInitialBalance(e.target.value)} onBlur={() => onUpdateSettings({ initialBalance: Number(initialBalance || 0) })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
       </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-1">النسخ الاحتياطي</div>
+        <div className="text-[11px] text-slate-400 mb-3">نزّل نسخة كاملة من كل بياناتك (عمليات، شركاء، أجهزة، مناديب، مخزون...) بملف واحد. احتفظ به بفلاشة أو ارفعه على جوجل درايف/آيكلاود عشان ما تفقد بياناتك لو صار شي بجهازك.</div>
+        <div className="flex gap-2">
+          <button onClick={onExportBackup} className="flex-1 bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold">⬇ تنزيل نسخة احتياطية</button>
+          <button onClick={() => fileInputRef.current.click()} className="flex-1 bg-white border border-slate-200 text-slate-600 rounded-xl py-2.5 text-xs font-semibold">⬆ استرجاع من ملف</button>
+          <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleFilePicked} className="hidden" />
+        </div>
+        {confirmImport && (
+          <div className="mt-3 bg-amber-50 rounded-xl p-3">
+            <div className="text-xs text-amber-700 mb-2">⚠ استرجاع هذا الملف بيستبدل كل بياناتك الحالية بالكامل. متأكد؟</div>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmImport(null)} className="flex-1 border border-slate-200 rounded-xl py-2 text-xs">إلغاء</button>
+              <button onClick={() => { onImportBackup(confirmImport); setConfirmImport(null); }} className="flex-1 bg-red-500 text-white rounded-xl py-2 text-xs font-semibold">نعم، استرجع</button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
         <div className="font-semibold text-sm mb-2">تصنيفات الإيرادات</div>
         <div className="flex flex-wrap gap-2 mb-3">
@@ -1376,17 +2948,24 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory 
   );
 }
 
-function TxModal({ type, setType, categories, initial, currency, onClose, onSave }) {
+function TxModal({ type, setType, categories, initial, currency, partners, onClose, onSave }) {
   const isEdit = !!initial;
   const [title, setTitle] = useState(initial?.title || "");
   const [person, setPerson] = useState(initial?.person || "");
+  const [partnerId, setPartnerId] = useState(initial?.partnerId || "");
   const [category, setCategory] = useState(initial?.category || "");
   const [amount, setAmount] = useState(initial?.amount ?? "");
   const [date, setDate] = useState(initial?.date || todayISO());
   const [notes, setNotes] = useState(initial?.notes || "");
   const [reason, setReason] = useState(initial?.notes || "");
+  const [paymentSource, setPaymentSource] = useState(initial?.linkedCashEntryId ? "cash" : initial?.linkedNetworkEntryId ? "network" : "none");
   const [err, setErr] = useState("");
   const cats = type === "income" ? categories.income : type === "expense" ? categories.expense : [];
+
+  function pickWho(value) {
+    if (value === "__other__") { setPartnerId(""); setPerson(""); }
+    else { const p = partners.find(x => x.id === value); setPartnerId(value); setPerson(p ? p.name : ""); }
+  }
 
   function save() {
     const amt = Number(amount);
@@ -1394,10 +2973,10 @@ function TxModal({ type, setType, categories, initial, currency, onClose, onSave
     if (!date) return setErr("التاريخ مطلوب");
     if (type === "withdraw") {
       if (!person.trim()) return setErr("اسم الشخص مطلوب");
-      onSave({ id: initial?.id, type, person: person.trim(), amount: amt, date, notes: reason.trim() });
+      onSave({ id: initial?.id, type, person: person.trim(), partnerId: partnerId || null, amount: amt, date, notes: reason.trim() });
     } else {
       if (!title.trim()) return setErr("اسم العملية مطلوب");
-      onSave({ id: initial?.id, type, title: title.trim(), category, amount: amt, date, notes: notes.trim() });
+      onSave({ id: initial?.id, type, title: title.trim(), category, amount: amt, date, notes: notes.trim(), paymentSource: type === "expense" ? paymentSource : "none" });
     }
   }
 
@@ -1414,7 +2993,20 @@ function TxModal({ type, setType, categories, initial, currency, onClose, onSave
         </div>
       )}
       {type === "withdraw" ? (
-        <Field label="اسم الشخص"><input value={person} onChange={e => setPerson(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+        <>
+          {partners && partners.length > 0 && (
+            <Field label="مين اللي سحب؟">
+              <select value={partnerId || (person && !partnerId ? "__other__" : "")} onChange={e => pickWho(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
+                <option value="">اختر...</option>
+                {partners.map(p => <option key={p.id} value={p.id}>شريك: {p.name}</option>)}
+                <option value="__other__">شخص آخر (اكتب الاسم)</option>
+              </select>
+            </Field>
+          )}
+          {(!partnerId) && (
+            <Field label="اسم الشخص"><input value={person} onChange={e => setPerson(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+          )}
+        </>
       ) : (
         <>
           <Field label="اسم العملية"><input value={title} onChange={e => setTitle(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
@@ -1425,6 +3017,16 @@ function TxModal({ type, setType, categories, initial, currency, onClose, onSave
             </select>
           </Field>
         </>
+      )}
+      {type === "expense" && (
+        <div className="mb-3">
+          <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري، يخصم تلقائيًا من السجل المناسب)</div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setPaymentSource("none")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
+            <button type="button" onClick={() => setPaymentSource("cash")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
+            <button type="button" onClick={() => setPaymentSource("network")} className={`flex-1 text-xs py-2 rounded-xl border font-medium ${paymentSource === "network" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💳 شبكة</button>
+          </div>
+        </div>
       )}
       <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
       <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
@@ -1495,7 +3097,7 @@ function BottomNav({ tab, setTab }) {
     { id: "reports", label: "التقارير", icon: "📊" },
     { id: "more", label: "المزيد", icon: "☰" },
   ];
-  const secondaryIds = ["devices", "obligations", "suppliers", "closing", "partners", "settings"];
+  const secondaryIds = ["devices", "obligations", "suppliers", "inventory", "invoices", "employees", "closing", "partners", "settings"];
   const activeId = secondaryIds.includes(tab) ? "more" : tab;
   return (
     <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-slate-100 flex items-center justify-around py-2 rounded-t-2xl">
@@ -1517,6 +3119,9 @@ function MoreMenu({ setTab }) {
     { id: "devices", label: "الأجهزة", icon: "📱", desc: "شراء وبيع أجهزة مستعملة وجديدة" },
     { id: "obligations", label: "الالتزامات الثابتة", icon: "🎯", desc: "إيجار، رواتب، والتزامات شهرية" },
     { id: "suppliers", label: "المناديب والموردين", icon: "🚚", desc: "متابعة ديون مناديب قطع الغيار" },
+    { id: "inventory", label: "جرد المخزون", icon: "📦", desc: "كميات القطع والأصناف الموجودة بالمحل" },
+    { id: "invoices", label: "فواتير المشتريات", icon: "🧮", desc: "تسجيل فواتير الشراء وتحديث المخزون تلقائيًا" },
+    { id: "employees", label: "الموظفين", icon: "🧑‍🔧", desc: "دفعات الرواتب والمتبقي لكل موظف" },
     { id: "closing", label: "التقفيلة اليومية", icon: "🧾", desc: "ملخص كامل لعمليات اليوم" },
     { id: "partners", label: "الشركاء", icon: "👥", desc: "الشركاء ونسب تقسيم الأرباح" },
     { id: "settings", label: "الإعدادات", icon: "⚙", desc: "اسم المحل، العملة، التصنيفات" },
