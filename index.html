@@ -194,6 +194,110 @@ function printClosing(shopName, date, opening, closing, income, expense, withdra
   return true;
 }
 
+function printFullSummaryReport(data, currency, includePartners) {
+  const cashTotal = data.cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
+  const networkTotal = data.networkLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
+  const safeTotal = data.safeLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
+
+  const supplierRows = data.suppliers.map(s => {
+    const bal = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
+    const debt = s.entries.filter(e => e.type === "debt").reduce((s2, e) => s2 + e.amount, 0);
+    const paid = s.entries.filter(e => e.type !== "debt").reduce((s2, e) => s2 + e.amount, 0);
+    return { name: s.name, phone: s.phone || "", debt, paid, bal };
+  }).sort((a, b) => b.bal - a.bal);
+  const totalSupplierDebt = supplierRows.reduce((s, r) => s + Math.max(0, r.bal), 0);
+
+  const curMonth = todayISO().slice(0, 7);
+  const employeeRows = data.employees.map(e => {
+    const paidThisMonth = e.entries.filter(x => x.date.slice(0, 7) === curMonth).reduce((s, x) => s + x.amount, 0);
+    const paidAllTime = e.entries.reduce((s, x) => s + x.amount, 0);
+    const salary = Number(e.monthlySalary || 0);
+    const remaining = salary - paidThisMonth;
+    return { name: e.name, phone: e.phone || "", salary, paidThisMonth, paidAllTime, remaining };
+  }).sort((a, b) => b.remaining - a.remaining);
+  const totalSalaryRemaining = employeeRows.reduce((s, r) => s + Math.max(0, r.remaining), 0);
+
+  const partnerRows = data.partners.map(p => {
+    const withdrawn = data.transactions.filter(t => t.type === "withdraw" && (
+      t.partnerId ? t.partnerId === p.id : (t.person || "").trim().toLowerCase() === p.name.trim().toLowerCase()
+    )).reduce((s, t) => s + t.amount, 0);
+    return { name: p.name, pct: p.percentage || 0, withdrawn };
+  }).sort((a, b) => b.withdrawn - a.withdrawn);
+  const totalWithdrawn = partnerRows.reduce((s, r) => s + r.withdrawn, 0);
+
+  const section = (title, icon, headers, rows, emptyMsg, totalLabel, totalValue, totalColor) => `
+    <h2>${icon} ${title}</h2>
+    <table>
+      <thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${rows || `<tr><td colspan="${headers.length}" style="text-align:center;color:#889A94;">${emptyMsg}</td></tr>`}</tbody>
+      ${totalValue != null ? `<tfoot><tr><td colspan="${headers.length - 1}" style="font-weight:bold;">${totalLabel}</td><td style="font-weight:bold;color:${totalColor};">${fmt(totalValue)} ${currency}</td></tr></tfoot>` : ""}
+    </table>`;
+
+  const supplierRowsHtml = supplierRows.map(r => `<tr>
+      <td>${r.name}</td><td>${r.phone}</td>
+      <td style="color:#A47A20;">${fmt(r.debt)}</td>
+      <td style="color:#146350;">${fmt(r.paid)}</td>
+      <td style="font-weight:bold;color:${r.bal > 0 ? "#A84A34" : "#146350"};">${fmt(r.bal)}</td>
+    </tr>`).join("");
+
+  const employeeRowsHtml = employeeRows.map(r => `<tr>
+      <td>${r.name}</td><td>${r.phone}</td>
+      <td>${fmt(r.salary)}</td>
+      <td style="color:#146350;">${fmt(r.paidThisMonth)}</td>
+      <td style="color:#66766F;">${fmt(r.paidAllTime)}</td>
+      <td style="font-weight:bold;color:${r.remaining > 0 ? "#285070" : (r.remaining < 0 ? "#A84A34" : "#146350")};">${r.remaining < 0 ? `أخذ زيادة ${fmt(-r.remaining)}` : fmt(r.remaining)}</td>
+    </tr>`).join("");
+
+  const partnerRowsHtml = partnerRows.map(r => `<tr>
+      <td>${r.name}</td><td>${r.pct}%</td>
+      <td style="font-weight:bold;color:#A47A20;">${fmt(r.withdrawn)}</td>
+    </tr>`).join("");
+
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>تقرير شامل - ${data.settings.shopName}</title>
+  <style>
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#24302B;}
+    h1{font-size:20px; margin-bottom:4px;}
+    h2{font-size:15px; margin:22px 0 8px; border-bottom:2px solid #24302B; padding-bottom:6px;}
+    .sub{color:#66766F; font-size:13px; margin-bottom:16px;}
+    .grid{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px;}
+    .card{border:1px solid #CFD9D6; border-radius:12px; padding:12px 16px; min-width:150px;}
+    .card .label{font-size:11px; color:#889A94; margin-bottom:4px;}
+    .card .value{font-size:16px; font-weight:bold;}
+    table{width:100%; border-collapse:collapse; margin-top:6px;}
+    th,td{border:1px solid #CFD9D6; padding:8px; text-align:right; font-size:12.5px;}
+    th{background:#F3F6F5;}
+    tfoot td{background:#F3F6F5;}
+    @media print { button{display:none;} }
+  </style></head>
+  <body>
+    <h1>تقرير مالي شامل</h1>
+    <div class="sub">${data.settings.shopName} · تاريخ التقرير: ${todayISO()}</div>
+    <div class="grid">
+      <div class="card"><div class="label">الكاش الحالي</div><div class="value">${fmt(cashTotal)} ${currency}</div></div>
+      <div class="card"><div class="label">الشبكة الحالية</div><div class="value">${fmt(networkTotal)} ${currency}</div></div>
+      <div class="card"><div class="label">الخزنة الحالية</div><div class="value">${fmt(safeTotal)} ${currency}</div></div>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="label">إجمالي ديون المناديب/الموردين</div><div class="value" style="color:#A84A34">${fmt(totalSupplierDebt)} ${currency}</div></div>
+      <div class="card"><div class="label">إجمالي رواتب متبقية (هذا الشهر)</div><div class="value" style="color:#285070">${fmt(totalSalaryRemaining)} ${currency}</div></div>
+      ${includePartners ? `<div class="card"><div class="label">إجمالي السحوبات (كل الوقت)</div><div class="value" style="color:#A47A20">${fmt(totalWithdrawn)} ${currency}</div></div>` : ""}
+    </div>
+
+    ${section("المناديب والموردين", "🚚", ["الاسم", "الجوال", "دين جديد", "مسدد/رجيع", "الباقي عليك"], supplierRowsHtml, "لا يوجد مناديب أو موردين مسجلين", "إجمالي المستحق للموردين", totalSupplierDebt, "#A84A34")}
+
+    ${section("الموظفين", "🧑‍🔧", ["الاسم", "الجوال", "الراتب الشهري", "المأخوذ هذا الشهر", "المأخوذ كل الوقت", "الباقي له هذا الشهر"], employeeRowsHtml, "لا يوجد موظفين مسجلين", "إجمالي الرواتب المتبقية", totalSalaryRemaining, "#285070")}
+
+    ${includePartners ? section("السحوبات (الشركاء)", "💸", ["الاسم", "النسبة", "إجمالي المسحوب"], partnerRowsHtml, "لا يوجد شركاء مسجلين أو سحوبات", "إجمالي السحوبات", totalWithdrawn, "#A47A20") : ""}
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+}
+
 const LEDGER_KIND_META = {
   expense: { icon: "📉", label: "مصروف", color: "#A84A34" },
   supplier: { icon: "🚚", label: "مندوب", color: "#A47A20" },
@@ -1258,7 +1362,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={(includePartners) => printFullSummaryReport(data, data.settings.currency, includePartners)} />
         )}
       </div>
 
@@ -3183,13 +3287,14 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup }) {
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
   const [newIncomeCat, setNewIncomeCat] = useState("");
   const [newExpenseCat, setNewExpenseCat] = useState("");
   const [confirmImport, setConfirmImport] = useState(null);
+  const [includePartnersInReport, setIncludePartnersInReport] = useState(true);
   const fileInputRef = useRef(null);
 
   function handleFilePicked(e) {
@@ -3205,6 +3310,16 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
         <Field label="اسم المحل"><input value={shopName} onChange={e => setShopName(e.target.value)} onBlur={() => onUpdateSettings({ shopName })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="العملة"><input value={currency} onChange={e => setCurrency(e.target.value)} onBlur={() => onUpdateSettings({ currency })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="الرصيد الابتدائي"><input type="number" value={initialBalance} onChange={e => setInitialBalance(e.target.value)} onBlur={() => onUpdateSettings({ initialBalance: Number(initialBalance || 0) })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-1">تقرير PDF شامل</div>
+        <div className="text-[11px] text-slate-400 mb-3">تقرير مرتب وقابل للطباعة/الحفظ كـ PDF يوضح المبلغ والباقي لكل مندوب ومورد، وكل موظف، وأرصدة الكاش والشبكة والخزنة الحالية.</div>
+        <label className="flex items-center gap-2 text-xs text-slate-600 mb-3">
+          <input type="checkbox" checked={includePartnersInReport} onChange={e => setIncludePartnersInReport(e.target.checked)} className="w-4 h-4" />
+          تضمين سحوبات الشركاء بالتقرير
+        </label>
+        <button onClick={() => onExportSummary(includePartnersInReport)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold">🧾 عرض/طباعة التقرير الشامل</button>
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
