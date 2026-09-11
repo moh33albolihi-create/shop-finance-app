@@ -5,33 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>محاسبة المحل</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        colors: {
-          slate: { 50:"#F3F6F5", 100:"#E6EBE9", 200:"#CFD9D6", 300:"#AEBDB8", 400:"#889A94", 500:"#66766F", 600:"#4C5B55", 700:"#384540", 800:"#24302B", 900:"#161E1A" },
-          red:   { 50:"#FBEEEC", 100:"#F5D7D1", 200:"#E8B3A8", 300:"#D68972", 400:"#C36B52", 500:"#A84A34", 600:"#8E3A27", 700:"#712E1F", 800:"#4F2016", 900:"#34140E" },
-          emerald:{ 50:"#EAF3EE", 100:"#CFE6D9", 200:"#A3D0B9", 300:"#71B594", 400:"#439971", 500:"#237E58", 600:"#146350", 700:"#0F4F41", 800:"#0B3B32", 900:"#072722" },
-          amber: { 50:"#FBF2E1", 100:"#F3DFB2", 200:"#E9C87F", 300:"#D9AC52", 400:"#C29332", 500:"#A47A20", 600:"#856318", 700:"#654C13", 800:"#47360D", 900:"#2C2108" },
-          blue:  { 50:"#EAF1F7", 100:"#C9DCEA", 200:"#A0C1D9", 300:"#6E9FC1", 400:"#4A80A8", 500:"#34648A", 600:"#285070", 700:"#1F3E58", 800:"#172E40", 900:"#0F1F2B" },
-        },
-        fontFamily: { sans: ["IBM Plex Sans Arabic", "system-ui", "sans-serif"] },
-      },
-    },
-  };
-</script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');
-  body { font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif; background:#F3F6F5; margin:0; }
+  body { font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif; background:#F6F7F9; margin:0; }
   * { box-sizing: border-box; }
   .num { font-variant-numeric: tabular-nums; }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-thumb { background: #AEBDB8; border-radius: 4px; }
-  :focus-visible { outline: 2px solid #285070; outline-offset: 1px; }
+  ::-webkit-scrollbar-thumb { background: #d7dbe1; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -48,7 +31,7 @@ const DEFAULT_DATA = {
   cashLog: [], // {id,date,type:'add'|'deduct',kind,amount,notes,linkedTxId,createdAt}
   networkLog: [], // {id,date,type:'add'|'deduct',kind,amount,notes,linkedTxId,createdAt}
   categories: {
-    income: ["صيانة", "بيع قطعة", "بيع جهاز", "مرتجع مشتريات", "أخرى"],
+    income: ["صيانة", "إكسسوارات", "بيع قطعة", "بيع جهاز", "مرتجع مشتريات", "أخرى"],
     expense: ["إيجار", "قطع غيار", "رواتب", "كهرباء", "مشتريات", "أدوات", "تسويق", "شراء أجهزة", "تسديد مناديب", "أخرى"],
   },
   partners: [],
@@ -96,12 +79,12 @@ function printInvoice(shopName, invoice, currency) {
   const rows = invoice.items.map((it, i) => `<tr><td>${i + 1}</td><td>${it.name}</td><td>${it.qty}</td><td>${fmt(it.unitCost)}</td><td>${fmt(it.lineTotal)}</td></tr>`).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>فاتورة ${invoice.invoiceNo}</title>
   <style>
-    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#24302B;}
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#1e293b;}
     h1{font-size:20px; margin-bottom:4px;}
-    .sub{color:#66766F; font-size:13px; margin-bottom:20px;}
+    .sub{color:#64748b; font-size:13px; margin-bottom:20px;}
     table{width:100%; border-collapse:collapse; margin-top:10px;}
-    th,td{border:1px solid #CFD9D6; padding:8px; text-align:right; font-size:13px;}
-    th{background:#F3F6F5;}
+    th,td{border:1px solid #e2e8f0; padding:8px; text-align:right; font-size:13px;}
+    th{background:#f8fafc;}
     .total{margin-top:16px; font-size:16px; font-weight:bold; text-align:left;}
     @media print { button{display:none;} }
   </style></head>
@@ -157,16 +140,16 @@ function printClosing(shopName, date, opening, closing, income, expense, withdra
   }).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>تقفيلة ${date}</title>
   <style>
-    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#24302B;}
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#1e293b;}
     h1{font-size:20px; margin-bottom:4px;}
-    .sub{color:#66766F; font-size:13px; margin-bottom:20px;}
+    .sub{color:#64748b; font-size:13px; margin-bottom:20px;}
     .grid{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px;}
-    .card{border:1px solid #CFD9D6; border-radius:12px; padding:12px 16px; min-width:140px;}
-    .card .label{font-size:11px; color:#889A94; margin-bottom:4px;}
+    .card{border:1px solid #e2e8f0; border-radius:12px; padding:12px 16px; min-width:140px;}
+    .card .label{font-size:11px; color:#94a3b8; margin-bottom:4px;}
     .card .value{font-size:16px; font-weight:bold;}
     table{width:100%; border-collapse:collapse; margin-top:10px;}
-    th,td{border:1px solid #CFD9D6; padding:8px; text-align:right; font-size:13px;}
-    th{background:#F3F6F5;}
+    th,td{border:1px solid #e2e8f0; padding:8px; text-align:right; font-size:13px;}
+    th{background:#f8fafc;}
     @media print { button{display:none;} }
   </style></head>
   <body>
@@ -175,14 +158,14 @@ function printClosing(shopName, date, opening, closing, income, expense, withdra
     <div class="grid">
       <div class="card"><div class="label">رصيد بداية اليوم</div><div class="value">${fmt(opening)} ${currency}</div></div>
       <div class="card"><div class="label">رصيد نهاية اليوم</div><div class="value">${fmt(closing)} ${currency}</div></div>
-      <div class="card"><div class="label">الإيرادات</div><div class="value" style="color:#146350">${fmt(income)} ${currency}</div></div>
-      <div class="card"><div class="label">المصروفات</div><div class="value" style="color:#A84A34">${fmt(expense)} ${currency}</div></div>
-      <div class="card"><div class="label">السحوبات</div><div class="value" style="color:#A47A20">${fmt(withdraw)} ${currency}</div></div>
-      <div class="card"><div class="label">صافي الربح</div><div class="value" style="color:#285070">${fmt(net)} ${currency}</div></div>
+      <div class="card"><div class="label">الإيرادات</div><div class="value" style="color:#0f9d6e">${fmt(income)} ${currency}</div></div>
+      <div class="card"><div class="label">المصروفات</div><div class="value" style="color:#d64545">${fmt(expense)} ${currency}</div></div>
+      <div class="card"><div class="label">السحوبات</div><div class="value" style="color:#b8860b">${fmt(withdraw)} ${currency}</div></div>
+      <div class="card"><div class="label">صافي الربح</div><div class="value" style="color:#3B82F6">${fmt(net)} ${currency}</div></div>
     </div>
     <table>
       <thead><tr><th>#</th><th>النوع</th><th>الاسم</th><th>التصنيف</th><th>المبلغ</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" style="text-align:center;color:#889A94;">لا توجد عمليات</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">لا توجد عمليات</td></tr>'}</tbody>
     </table>
   </body></html>`;
   const w = window.open("", "_blank");
@@ -194,123 +177,19 @@ function printClosing(shopName, date, opening, closing, income, expense, withdra
   return true;
 }
 
-function printFullSummaryReport(data, currency, includePartners) {
-  const cashTotal = data.cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
-  const networkTotal = data.networkLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
-  const safeTotal = data.safeLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
-
-  const supplierRows = data.suppliers.map(s => {
-    const bal = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
-    const debt = s.entries.filter(e => e.type === "debt").reduce((s2, e) => s2 + e.amount, 0);
-    const paid = s.entries.filter(e => e.type !== "debt").reduce((s2, e) => s2 + e.amount, 0);
-    return { name: s.name, phone: s.phone || "", debt, paid, bal };
-  }).sort((a, b) => b.bal - a.bal);
-  const totalSupplierDebt = supplierRows.reduce((s, r) => s + Math.max(0, r.bal), 0);
-
-  const curMonth = todayISO().slice(0, 7);
-  const employeeRows = data.employees.map(e => {
-    const paidThisMonth = e.entries.filter(x => x.date.slice(0, 7) === curMonth).reduce((s, x) => s + x.amount, 0);
-    const paidAllTime = e.entries.reduce((s, x) => s + x.amount, 0);
-    const salary = Number(e.monthlySalary || 0);
-    const remaining = salary - paidThisMonth;
-    return { name: e.name, phone: e.phone || "", salary, paidThisMonth, paidAllTime, remaining };
-  }).sort((a, b) => b.remaining - a.remaining);
-  const totalSalaryRemaining = employeeRows.reduce((s, r) => s + Math.max(0, r.remaining), 0);
-
-  const partnerRows = data.partners.map(p => {
-    const withdrawn = data.transactions.filter(t => t.type === "withdraw" && (
-      t.partnerId ? t.partnerId === p.id : (t.person || "").trim().toLowerCase() === p.name.trim().toLowerCase()
-    )).reduce((s, t) => s + t.amount, 0);
-    return { name: p.name, pct: p.percentage || 0, withdrawn };
-  }).sort((a, b) => b.withdrawn - a.withdrawn);
-  const totalWithdrawn = partnerRows.reduce((s, r) => s + r.withdrawn, 0);
-
-  const section = (title, icon, headers, rows, emptyMsg, totalLabel, totalValue, totalColor) => `
-    <h2>${icon} ${title}</h2>
-    <table>
-      <thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
-      <tbody>${rows || `<tr><td colspan="${headers.length}" style="text-align:center;color:#889A94;">${emptyMsg}</td></tr>`}</tbody>
-      ${totalValue != null ? `<tfoot><tr><td colspan="${headers.length - 1}" style="font-weight:bold;">${totalLabel}</td><td style="font-weight:bold;color:${totalColor};">${fmt(totalValue)} ${currency}</td></tr></tfoot>` : ""}
-    </table>`;
-
-  const supplierRowsHtml = supplierRows.map(r => `<tr>
-      <td>${r.name}</td><td>${r.phone}</td>
-      <td style="color:#A47A20;">${fmt(r.debt)}</td>
-      <td style="color:#146350;">${fmt(r.paid)}</td>
-      <td style="font-weight:bold;color:${r.bal > 0 ? "#A84A34" : "#146350"};">${fmt(r.bal)}</td>
-    </tr>`).join("");
-
-  const employeeRowsHtml = employeeRows.map(r => `<tr>
-      <td>${r.name}</td><td>${r.phone}</td>
-      <td>${fmt(r.salary)}</td>
-      <td style="color:#146350;">${fmt(r.paidThisMonth)}</td>
-      <td style="color:#66766F;">${fmt(r.paidAllTime)}</td>
-      <td style="font-weight:bold;color:${r.remaining > 0 ? "#285070" : (r.remaining < 0 ? "#A84A34" : "#146350")};">${r.remaining < 0 ? `أخذ زيادة ${fmt(-r.remaining)}` : fmt(r.remaining)}</td>
-    </tr>`).join("");
-
-  const partnerRowsHtml = partnerRows.map(r => `<tr>
-      <td>${r.name}</td><td>${r.pct}%</td>
-      <td style="font-weight:bold;color:#A47A20;">${fmt(r.withdrawn)}</td>
-    </tr>`).join("");
-
-  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>تقرير شامل - ${data.settings.shopName}</title>
-  <style>
-    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#24302B;}
-    h1{font-size:20px; margin-bottom:4px;}
-    h2{font-size:15px; margin:22px 0 8px; border-bottom:2px solid #24302B; padding-bottom:6px;}
-    .sub{color:#66766F; font-size:13px; margin-bottom:16px;}
-    .grid{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px;}
-    .card{border:1px solid #CFD9D6; border-radius:12px; padding:12px 16px; min-width:150px;}
-    .card .label{font-size:11px; color:#889A94; margin-bottom:4px;}
-    .card .value{font-size:16px; font-weight:bold;}
-    table{width:100%; border-collapse:collapse; margin-top:6px;}
-    th,td{border:1px solid #CFD9D6; padding:8px; text-align:right; font-size:12.5px;}
-    th{background:#F3F6F5;}
-    tfoot td{background:#F3F6F5;}
-    @media print { button{display:none;} }
-  </style></head>
-  <body>
-    <h1>تقرير مالي شامل</h1>
-    <div class="sub">${data.settings.shopName} · تاريخ التقرير: ${todayISO()}</div>
-    <div class="grid">
-      <div class="card"><div class="label">الكاش الحالي</div><div class="value">${fmt(cashTotal)} ${currency}</div></div>
-      <div class="card"><div class="label">الشبكة الحالية</div><div class="value">${fmt(networkTotal)} ${currency}</div></div>
-      <div class="card"><div class="label">الخزنة الحالية</div><div class="value">${fmt(safeTotal)} ${currency}</div></div>
-    </div>
-    <div class="grid">
-      <div class="card"><div class="label">إجمالي ديون المناديب/الموردين</div><div class="value" style="color:#A84A34">${fmt(totalSupplierDebt)} ${currency}</div></div>
-      <div class="card"><div class="label">إجمالي رواتب متبقية (هذا الشهر)</div><div class="value" style="color:#285070">${fmt(totalSalaryRemaining)} ${currency}</div></div>
-      ${includePartners ? `<div class="card"><div class="label">إجمالي السحوبات (كل الوقت)</div><div class="value" style="color:#A47A20">${fmt(totalWithdrawn)} ${currency}</div></div>` : ""}
-    </div>
-
-    ${section("المناديب والموردين", "🚚", ["الاسم", "الجوال", "دين جديد", "مسدد/رجيع", "الباقي عليك"], supplierRowsHtml, "لا يوجد مناديب أو موردين مسجلين", "إجمالي المستحق للموردين", totalSupplierDebt, "#A84A34")}
-
-    ${section("الموظفين", "🧑‍🔧", ["الاسم", "الجوال", "الراتب الشهري", "المأخوذ هذا الشهر", "المأخوذ كل الوقت", "الباقي له هذا الشهر"], employeeRowsHtml, "لا يوجد موظفين مسجلين", "إجمالي الرواتب المتبقية", totalSalaryRemaining, "#285070")}
-
-    ${includePartners ? section("السحوبات (الشركاء)", "💸", ["الاسم", "النسبة", "إجمالي المسحوب"], partnerRowsHtml, "لا يوجد شركاء مسجلين أو سحوبات", "إجمالي السحوبات", totalWithdrawn, "#A47A20") : ""}
-  </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) return false;
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 300);
-  return true;
-}
-
 const LEDGER_KIND_META = {
-  expense: { icon: "📉", label: "مصروف", color: "#A84A34" },
-  supplier: { icon: "🚚", label: "مندوب", color: "#A47A20" },
-  employee: { icon: "🧑‍🔧", label: "راتب", color: "#285070" },
-  withdraw: { icon: "↗", label: "سحب", color: "#A47A20" },
-  safe: { icon: "🔒", label: "خزنة", color: "#66766F" },
-  manual: { icon: "✏️", label: "يدوي", color: "#66766F" },
+  expense: { icon: "📉", label: "مصروف", color: "#d64545" },
+  supplier: { icon: "🚚", label: "مندوب", color: "#b8860b" },
+  employee: { icon: "🧑‍🔧", label: "راتب", color: "#3B82F6" },
+  withdraw: { icon: "↗", label: "سحب", color: "#b8860b" },
+  safe: { icon: "🔒", label: "خزنة", color: "#64748b" },
+  manual: { icon: "✏️", label: "يدوي", color: "#64748b" },
 };
 
 const TYPE_META = {
-  income: { label: "إيراد", color: "#146350", bg: "#EAF3EE", icon: "↑" },
-  expense: { label: "مصروف", color: "#A84A34", bg: "#FBEEEC", icon: "↓" },
-  withdraw: { label: "سحب", color: "#A47A20", bg: "#FBF2E1", icon: "↗" },
+  income: { label: "إيراد", color: "#0f9d6e", bg: "#e7f7f1", icon: "↑" },
+  expense: { label: "مصروف", color: "#d64545", bg: "#fdecec", icon: "↓" },
+  withdraw: { label: "سحب", color: "#b8860b", bg: "#fbf2df", icon: "↗" },
 };
 
 function loadData() {
@@ -786,12 +665,13 @@ function App() {
     let safeLog = [...data.safeLog];
     let settings = { ...data.settings };
 
-    if (Number(payload.salesAmount) > 0) {
+    (payload.sales || []).forEach(s => {
+      if (!(Number(s.amount) > 0)) return;
       transactions = [{
-        id: uid(), type: "income", title: payload.salesTitle || "مبيعات اليوم", category: payload.salesCategory || "",
-        amount: Number(payload.salesAmount), date: payload.date, notes: payload.salesNotes || "", createdAt: new Date().toISOString(),
+        id: uid(), type: "income", title: s.category ? `مبيعات ${s.category} - ${payload.date}` : `مبيعات يوم ${payload.date}`, category: s.category || "",
+        amount: Number(s.amount), date: payload.date, notes: s.notes || "", createdAt: new Date().toISOString(),
       }, ...transactions];
-    }
+    });
 
     (payload.expenses || []).forEach(exp => {
       if (!(Number(exp.amount) > 0)) return;
@@ -1311,7 +1191,7 @@ function App() {
   }
 
   return (
-    <div dir="rtl" className="min-h-[700px] bg-[#F3F6F5] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
+    <div dir="rtl" className="min-h-[700px] bg-[#F6F7F9] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
       <TopBar shopName={data.settings.shopName} balance={totals.balance} currency={data.settings.currency}
         cashTotal={cashTotal} onOpenCashLog={() => setCashLogOpen(true)}
         networkTotal={networkTotal} onOpenNetworkLog={() => setNetworkLogOpen(true)}
@@ -1362,7 +1242,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={(includePartners) => printFullSummaryReport(data, data.settings.currency, includePartners)} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} />
         )}
       </div>
 
@@ -1412,7 +1292,7 @@ function App() {
 
 function TopBar({ shopName, balance, currency, cashTotal, onOpenCashLog, networkTotal, onOpenNetworkLog, safeTotal, onOpenSafeLog }) {
   return (
-    <div className="px-5 pt-6 pb-5 bg-[#161E1A] text-white rounded-b-3xl shadow-sm">
+    <div className="px-5 pt-6 pb-5 bg-[#12213B] text-white rounded-b-3xl shadow-sm">
       <div className="text-xs text-white/60 mb-1">{shopName}</div>
       <div className="flex items-end justify-between mb-3">
         <div>
@@ -1713,7 +1593,7 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
   const recent = data.transactions.slice(0, 6);
   return (
     <div className="space-y-4">
-      <button onClick={onOpenQuickDaily} className="w-full bg-[#161E1A] text-white rounded-2xl p-4 flex items-center justify-between shadow-sm">
+      <button onClick={onOpenQuickDaily} className="w-full bg-[#12213B] text-white rounded-2xl p-4 flex items-center justify-between shadow-sm">
         <div className="text-right">
           <div className="font-semibold text-sm">📝 إدخال يومية سريعة</div>
           <div className="text-[11px] text-white/60">مبيعات، مصروفات، تسديد مندوب، كاش وشبكة اليوم — بضغطة وحدة</div>
@@ -1721,10 +1601,10 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
         <span className="text-xl">›</span>
       </button>
       <div className="grid grid-cols-2 gap-3">
-        <StatCard icon="📈" color="#146350" label={`إيرادات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.income} currency={data.settings.currency} />
-        <StatCard icon="📉" color="#A84A34" label={`مصروفات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.expense} currency={data.settings.currency} />
-        <StatCard icon="↗" color="#A47A20" label="سحوبات الشهر" value={mt.withdraw} currency={data.settings.currency} />
-        <StatCard icon="🏦" color="#285070" label="صافي ربح الشهر" value={mt.net} currency={data.settings.currency} />
+        <StatCard icon="📈" color="#0f9d6e" label={`إيرادات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label={`مصروفات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات الشهر" value={mt.withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح الشهر" value={mt.net} currency={data.settings.currency} />
       </div>
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
         <div>
@@ -1749,15 +1629,17 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
 
 function QuickDailyModal({ data, onClose, onSave }) {
   const [date, setDate] = useState(todayISO());
-  const [salesAmount, setSalesAmount] = useState("");
-  const [salesCategory, setSalesCategory] = useState("");
-  const [salesNotes, setSalesNotes] = useState("");
+  const [sales, setSales] = useState([{ amount: "", category: "", notes: "" }]);
   const [expenses, setExpenses] = useState([{ amount: "", category: "", notes: "", paymentSource: "none" }]);
   const [supplierPayments, setSupplierPayments] = useState([{ supplierId: "", amount: "", paymentSource: "none" }]);
   const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "", paymentSource: "none" }]);
   const [cashToday, setCashToday] = useState("");
   const [networkToday, setNetworkToday] = useState("");
   const [err, setErr] = useState("");
+
+  function updateSale(idx, patch) { setSales(sales.map((s, i) => i === idx ? { ...s, ...patch } : s)); }
+  function addSaleRow() { setSales([...sales, { amount: "", category: "", notes: "" }]); }
+  function removeSaleRow(idx) { setSales(sales.filter((_, i) => i !== idx)); }
 
   function updateExpense(idx, patch) { setExpenses(expenses.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
   function addExpenseRow() { setExpenses([...expenses, { amount: "", category: "", notes: "", paymentSource: "none" }]); }
@@ -1773,13 +1655,14 @@ function QuickDailyModal({ data, onClose, onSave }) {
 
   function save() {
     if (!date) return setErr("التاريخ مطلوب");
+    const validSales = sales.filter(s => Number(s.amount) > 0);
     const validExpenses = expenses.filter(e => Number(e.amount) > 0);
     const validSuppliers = supplierPayments.filter(s => s.supplierId && Number(s.amount) > 0);
     const validEmployees = employeePayments.filter(e => e.employeeId && Number(e.amount) > 0);
-    const hasAny = Number(salesAmount) > 0 || validExpenses.length > 0 || validSuppliers.length > 0 || validEmployees.length > 0 || Number(networkToday) > 0 || (cashToday !== "" && cashToday != null);
+    const hasAny = validSales.length > 0 || validExpenses.length > 0 || validSuppliers.length > 0 || validEmployees.length > 0 || Number(networkToday) > 0 || (cashToday !== "" && cashToday != null);
     if (!hasAny) return setErr("عبّي خانة وحدة على الأقل");
     onSave({
-      date, salesAmount, salesCategory, salesNotes, salesTitle: `مبيعات يوم ${date}`,
+      date, sales: validSales,
       expenses: validExpenses, supplierPayments: validSuppliers, employeePayments: validEmployees, cashToday, networkToday,
     });
   }
@@ -1789,17 +1672,27 @@ function QuickDailyModal({ data, onClose, onSave }) {
       <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
 
       <div className="bg-emerald-50 rounded-xl p-3 mb-3">
-        <div className="text-xs font-semibold text-emerald-700 mb-2">📈 مبلغ المبيعات</div>
-        <input type="number" value={salesAmount} onChange={e => setSalesAmount(e.target.value)} placeholder={`المبلغ (${data.settings.currency})`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num mb-2" />
-        <select value={salesCategory} onChange={e => setSalesCategory(e.target.value)} className="w-full bg-white rounded-xl py-2 px-2 text-xs outline-none mb-2">
-          <option value="">بدون تصنيف</option>
-          {data.categories.income.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <input value={salesNotes} onChange={e => setSalesNotes(e.target.value)} placeholder="ملاحظات (اختياري)" className="w-full bg-white rounded-xl py-2 px-3 text-xs outline-none" />
+        <div className="text-xs font-semibold text-emerald-700 mb-2">📈 المبيعات (فرّقها حسب النوع، مثل: صيانة، إكسسوارات)</div>
+        <div className="space-y-2">
+          {sales.map((s, idx) => (
+            <div key={idx} className="bg-white rounded-xl p-2 space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <input type="number" value={s.amount} onChange={e => updateSale(idx, { amount: e.target.value })} placeholder={`المبلغ (${data.settings.currency})`} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
+                <select value={s.category} onChange={e => updateSale(idx, { category: e.target.value })} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none">
+                  <option value="">بدون تصنيف</option>
+                  {data.categories.income.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                {sales.length > 1 && <button onClick={() => removeSaleRow(idx)} className="text-red-400 px-1">✕</button>}
+              </div>
+              <input value={s.notes} onChange={e => updateSale(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
+            </div>
+          ))}
+        </div>
+        <button onClick={addSaleRow} className="text-xs text-emerald-700 mt-2">＋ إضافة نوع مبيعات آخر</button>
       </div>
 
       <div className="bg-red-50 rounded-xl p-3 mb-3">
-        <div className="text-xs font-semibold text-red-600 mb-2">📉 المصروفات</div>
+        <div className="text-xs font-semibold text-red-600 mb-2">📉 المصروفات (كل واحد يتسجل مصروف مستقل)</div>
         <div className="space-y-2">
           {expenses.map((exp, idx) => (
             <div key={idx} className="bg-white rounded-xl p-2 space-y-1.5">
@@ -1826,7 +1719,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
 
       {data.suppliers.length > 0 && (
         <div className="bg-amber-50 rounded-xl p-3 mb-3">
-          <div className="text-xs font-semibold text-amber-700 mb-2">🚚 تسديد لأكثر من مندوب</div>
+          <div className="text-xs font-semibold text-amber-700 mb-2">🚚 تسديد لأكثر من مندوب (اختياري — يخصم من ديونهم تلقائي)</div>
           <div className="space-y-2">
             {supplierPayments.map((sp, idx) => (
               <div key={idx} className="bg-white rounded-lg p-2 space-y-1">
@@ -1853,7 +1746,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
 
       {data.employees.length > 0 && (
         <div className="bg-blue-50 rounded-xl p-3 mb-3">
-          <div className="text-xs font-semibold text-blue-700 mb-2">🧑‍🔧 دفعات رواتب لأكثر من موظف</div>
+          <div className="text-xs font-semibold text-blue-700 mb-2">🧑‍🔧 دفعات رواتب لأكثر من موظف (اختياري)</div>
           <div className="space-y-2">
             {employeePayments.map((ep, idx) => (
               <div key={idx} className="bg-white rounded-lg p-2 space-y-1">
@@ -1879,12 +1772,12 @@ function QuickDailyModal({ data, onClose, onSave }) {
       )}
 
       <div className="bg-slate-50 rounded-xl p-3 mb-3">
-        <div className="text-xs font-semibold text-slate-600 mb-2">💵 كاش اليوم</div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">💵 كاش اليوم (يحدّث رقم الكاش مباشرة)</div>
         <input type="number" value={cashToday} onChange={e => setCashToday(e.target.value)} placeholder={`اتركه فاضي لو ما تبي تحدثه`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num" />
       </div>
 
       <div className="bg-slate-50 rounded-xl p-3 mb-3">
-        <div className="text-xs font-semibold text-slate-600 mb-2">💳 شبكة اليوم</div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">💳 شبكة اليوم (يضيف قيد جديد بالسجل)</div>
         <input type="number" value={networkToday} onChange={e => setNetworkToday(e.target.value)} placeholder={`المبلغ اللي دخل شبكة اليوم`} className="w-full bg-white rounded-xl py-2.5 px-3 text-sm outline-none num" />
       </div>
 
@@ -2000,15 +1893,15 @@ function TrendChart({ points }) {
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-40">
-        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#E6EBE9" strokeWidth="1" />
-        <path d={pathFor("income")} fill="none" stroke="#146350" strokeWidth="2" />
-        <path d={pathFor("expense")} fill="none" stroke="#A84A34" strokeWidth="2" />
-        <path d={pathFor("net")} fill="none" stroke="#285070" strokeWidth="2" />
+        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#eef1f4" strokeWidth="1" />
+        <path d={pathFor("income")} fill="none" stroke="#0f9d6e" strokeWidth="2" />
+        <path d={pathFor("expense")} fill="none" stroke="#d64545" strokeWidth="2" />
+        <path d={pathFor("net")} fill="none" stroke="#3B82F6" strokeWidth="2" />
       </svg>
       <div className="flex items-center gap-4 justify-center text-[11px] text-slate-500 mt-1">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#146350" }}></span>إيرادات</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#A84A34" }}></span>مصروفات</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#285070" }}></span>ربح</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#0f9d6e" }}></span>إيرادات</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#d64545" }}></span>مصروفات</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#3B82F6" }}></span>ربح</span>
       </div>
     </div>
   );
@@ -2031,10 +1924,10 @@ function Reports({ data, monthTotals, yearTotals, curYear, initialBalance, expor
         </select>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        <StatCard icon="📈" color="#146350" label="إيرادات السنة" value={yt.income} currency={data.settings.currency} />
-        <StatCard icon="📉" color="#A84A34" label="مصروفات السنة" value={yt.expense} currency={data.settings.currency} />
-        <StatCard icon="↗" color="#A47A20" label="سحوبات السنة" value={yt.withdraw} currency={data.settings.currency} />
-        <StatCard icon="🏦" color="#285070" label="صافي ربح السنة" value={yt.net} currency={data.settings.currency} />
+        <StatCard icon="📈" color="#0f9d6e" label="إيرادات السنة" value={yt.income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label="مصروفات السنة" value={yt.expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات السنة" value={yt.withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح السنة" value={yt.net} currency={data.settings.currency} />
       </div>
       <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100">
         <div className="font-semibold text-sm mb-2">الإيرادات والمصروفات والربح خلال السنة</div>
@@ -2140,7 +2033,7 @@ function ObligationCard({ o, currency, onEdit, onDelete, onAdjust, onReset }) {
       </div>
       <div className="text-xs text-slate-500 mb-1.5">جمعت <span className="font-bold num text-slate-800">{fmt(collected)}</span> من أصل <span className="font-bold num text-slate-800">{fmt(target)}</span> {currency}</div>
       <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
-        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: done ? "#146350" : "#285070" }} />
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: done ? "#0f9d6e" : "#3B82F6" }} />
       </div>
       <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
         <span>{pct}%</span><span>{done ? "مكتمل ✓" : `متبقي ${fmt(remaining)} ${currency}`}</span>
@@ -2518,6 +2411,46 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
         </div>
       )}
 
+      {data.suppliers.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[480px]">
+              <thead>
+                <tr className="border-b border-slate-100 text-slate-400">
+                  <th className="text-right font-medium py-2 px-3">الاسم</th>
+                  <th className="text-right font-medium py-2 px-3">الجوال</th>
+                  <th className="text-right font-medium py-2 px-3">دين جديد</th>
+                  <th className="text-right font-medium py-2 px-3">مسدد/رجيع</th>
+                  <th className="text-right font-medium py-2 px-3">الباقي عليك</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.suppliers.map(s => {
+                  const debtTotal = s.entries.filter(e => e.type === "debt").reduce((sum, e) => sum + e.amount, 0);
+                  const paidReturnTotal = s.entries.filter(e => e.type !== "debt").reduce((sum, e) => sum + e.amount, 0);
+                  const remaining = debtTotal - paidReturnTotal;
+                  return (
+                    <tr key={s.id} className="border-b border-slate-50">
+                      <td className="py-2 px-3 font-medium">{s.name}</td>
+                      <td className="py-2 px-3 text-slate-400">{s.phone || "—"}</td>
+                      <td className="py-2 px-3 num text-amber-600 font-semibold">{fmt(debtTotal)}</td>
+                      <td className="py-2 px-3 num text-emerald-600 font-semibold">{fmt(paidReturnTotal)}</td>
+                      <td className={`py-2 px-3 num font-bold ${remaining > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(remaining)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={4} className="py-2.5 px-3 font-bold text-slate-700">إجمالي المستحق للموردين</td>
+                  <td className={`py-2.5 px-3 num font-bold ${totalDebt > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(totalDebt)} {data.settings.currency}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
       {data.suppliers.length === 0 ? (
         <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد مناديب مضافون بعد</div>
       ) : (
@@ -2697,10 +2630,10 @@ function DailyClosing({ data, totals, onSaveClosing, exportDayCSV }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <StatCard icon="📈" color="#146350" label="إيرادات اليوم" value={income} currency={data.settings.currency} />
-        <StatCard icon="📉" color="#A84A34" label="مصروفات اليوم" value={expense} currency={data.settings.currency} />
-        <StatCard icon="↗" color="#A47A20" label="سحوبات اليوم" value={withdraw} currency={data.settings.currency} />
-        <StatCard icon="🏦" color="#285070" label="صافي ربح اليوم" value={net} currency={data.settings.currency} />
+        <StatCard icon="📈" color="#0f9d6e" label="إيرادات اليوم" value={income} currency={data.settings.currency} />
+        <StatCard icon="📉" color="#d64545" label="مصروفات اليوم" value={expense} currency={data.settings.currency} />
+        <StatCard icon="↗" color="#b8860b" label="سحوبات اليوم" value={withdraw} currency={data.settings.currency} />
+        <StatCard icon="🏦" color="#3B82F6" label="صافي ربح اليوم" value={net} currency={data.settings.currency} />
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
@@ -3132,7 +3065,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                   أخذ <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} هذا الشهر
                 </div>
                 <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
-                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#146350" : "#285070" }} />
+                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#0f9d6e" : "#3B82F6" }} />
                 </div>
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
                   <span>{pct}%</span>
@@ -3287,14 +3220,13 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary }) {
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
   const [newIncomeCat, setNewIncomeCat] = useState("");
   const [newExpenseCat, setNewExpenseCat] = useState("");
   const [confirmImport, setConfirmImport] = useState(null);
-  const [includePartnersInReport, setIncludePartnersInReport] = useState(true);
   const fileInputRef = useRef(null);
 
   function handleFilePicked(e) {
@@ -3310,16 +3242,6 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
         <Field label="اسم المحل"><input value={shopName} onChange={e => setShopName(e.target.value)} onBlur={() => onUpdateSettings({ shopName })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="العملة"><input value={currency} onChange={e => setCurrency(e.target.value)} onBlur={() => onUpdateSettings({ currency })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="الرصيد الابتدائي"><input type="number" value={initialBalance} onChange={e => setInitialBalance(e.target.value)} onBlur={() => onUpdateSettings({ initialBalance: Number(initialBalance || 0) })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
-      </div>
-
-      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
-        <div className="font-semibold text-sm mb-1">تقرير PDF شامل</div>
-        <div className="text-[11px] text-slate-400 mb-3">تقرير مرتب وقابل للطباعة/الحفظ كـ PDF يوضح المبلغ والباقي لكل مندوب ومورد، وكل موظف، وأرصدة الكاش والشبكة والخزنة الحالية.</div>
-        <label className="flex items-center gap-2 text-xs text-slate-600 mb-3">
-          <input type="checkbox" checked={includePartnersInReport} onChange={e => setIncludePartnersInReport(e.target.checked)} className="w-4 h-4" />
-          تضمين سحوبات الشركاء بالتقرير
-        </label>
-        <button onClick={() => onExportSummary(includePartnersInReport)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold">🧾 عرض/طباعة التقرير الشامل</button>
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
@@ -3404,7 +3326,7 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
         <div className="flex gap-2 mb-3">
           {["income", "expense", "withdraw"].map(t => (
             <button key={t} onClick={() => setType(t)} className="flex-1 text-xs py-2 rounded-xl border font-medium"
-              style={type === t ? { background: TYPE_META[t].color, borderColor: TYPE_META[t].color, color: "white" } : { borderColor: "#CFD9D6", color: "#66766F" }}>
+              style={type === t ? { background: TYPE_META[t].color, borderColor: TYPE_META[t].color, color: "white" } : { borderColor: "#e2e8f0", color: "#64748b" }}>
               {TYPE_META[t].label}
             </button>
           ))}
@@ -3525,7 +3447,7 @@ function BottomNav({ tab, setTab }) {
         return (
           <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-0.5 px-2 py-1">
             <span className="text-base" style={{ opacity: active ? 1 : 0.55 }}>{it.icon}</span>
-            <span className={`text-[10px] ${active ? "text-[#161E1A] font-semibold" : "text-slate-400"}`}>{it.label}</span>
+            <span className={`text-[10px] ${active ? "text-[#12213B] font-semibold" : "text-slate-400"}`}>{it.label}</span>
           </button>
         );
       })}
