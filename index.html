@@ -75,6 +75,102 @@ function buildInvoiceText(shopName, invoice, currency) {
   return lines.join("\n");
 }
 
+function reportSection(title, icon, columns, rowsHtml, emptyMsg, totalLabel, totalValue, color) {
+  return `
+    <div style="margin-bottom:24px;">
+      <h2 style="font-size:15px; margin-bottom:8px; color:${color};">${icon} ${title}</h2>
+      <table style="width:100%; border-collapse:collapse;">
+        <thead><tr>${columns.map(c => `<th style="border:1px solid #e2e8f0; background:#f8fafc; padding:6px 8px; font-size:11px; text-align:right;">${c}</th>`).join("")}</tr></thead>
+        <tbody>${rowsHtml || `<tr><td colspan="${columns.length}" style="text-align:center; color:#94a3b8; padding:10px; font-size:12px;">${emptyMsg}</td></tr>`}</tbody>
+        <tfoot><tr>
+          <td colspan="${columns.length - 1}" style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px; font-weight:bold;">${totalLabel}</td>
+          <td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px; font-weight:bold;">${fmt(totalValue)}</td>
+        </tr></tfoot>
+      </table>
+    </div>`;
+}
+
+function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, includePartners) {
+  const currency = data.settings.currency;
+  const curMonth = todayISO().slice(0, 7);
+
+  const monthTx = data.transactions.filter(t => t.date.slice(0, 7) === curMonth);
+  const monthIncome = monthTx.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const monthExpense = monthTx.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const monthWithdraw = monthTx.filter(t => t.type === "withdraw").reduce((s, t) => s + t.amount, 0);
+  const monthNet = monthIncome - monthExpense;
+  const monthArabicName = AR_MONTHS[new Date().getMonth()];
+
+  let totalSupplierDebt = 0;
+  let totalSupplierPaid = 0;
+  let totalSupplierReturned = 0;
+  const supplierRowsHtml = data.suppliers.map(s => {
+    const debtTotal = s.entries.filter(e => e.type === "debt").reduce((sum, e) => sum + e.amount, 0);
+    const paidTotal = s.entries.filter(e => e.type === "payment").reduce((sum, e) => sum + e.amount, 0);
+    const returnedTotal = s.entries.filter(e => e.type === "return").reduce((sum, e) => sum + e.amount, 0);
+    const remaining = debtTotal - paidTotal - returnedTotal;
+    totalSupplierDebt += remaining;
+    totalSupplierPaid += paidTotal;
+    totalSupplierReturned += returnedTotal;
+    return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.phone || "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(debtTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(paidTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(returnedTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(remaining)}</td></tr>`;
+  }).join("");
+
+  let totalSalaryRemaining = 0;
+  const employeeRowsHtml = data.employees.map(emp => {
+    const takenThisMonth = (emp.entries || []).filter(e => e.date.slice(0, 7) === curMonth).reduce((s, e) => s + e.amount, 0);
+    const takenAllTime = (emp.entries || []).reduce((s, e) => s + e.amount, 0);
+    const remaining = Number(emp.monthlySalary || 0) - takenThisMonth;
+    totalSalaryRemaining += Math.max(0, remaining);
+    return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${emp.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${emp.phone || "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(emp.monthlySalary)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(takenThisMonth)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(takenAllTime)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(remaining)}</td></tr>`;
+  }).join("");
+
+  let totalWithdrawn = 0;
+  const partnerRowsHtml = data.partners.map(p => {
+    const withdrawn = data.transactions.filter(t => t.type === "withdraw" && (t.partnerId ? t.partnerId === p.id : (t.person || "").trim().toLowerCase() === p.name.trim().toLowerCase())).reduce((s, t) => s + t.amount, 0);
+    totalWithdrawn += withdrawn;
+    return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${p.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${p.percentage ? p.percentage + "%" : "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(withdrawn)}</td></tr>`;
+  }).join("");
+
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>تقرير شامل</title>
+  <style>
+    body{font-family:'IBM Plex Sans Arabic', Tahoma, sans-serif; padding:28px; color:#1e293b;}
+    h1{font-size:20px; margin-bottom:4px;}
+    .sub{color:#64748b; font-size:13px; margin-bottom:16px;}
+    .balances{display:flex; gap:12px; margin-bottom:24px; flex-wrap:wrap;}
+    .balances div{border:1px solid #e2e8f0; border-radius:10px; padding:10px 16px;}
+    .balances .label{font-size:11px; color:#94a3b8;}
+    .balances .value{font-size:15px; font-weight:bold;}
+    @media print { button{display:none;} }
+  </style></head>
+  <body>
+    <h1>🧾 تقرير شامل</h1>
+    <div class="sub">${data.settings.shopName} — ${todayISO()}</div>
+    <div class="balances">
+      <div><div class="label">💵 كاش</div><div class="value">${fmt(cashTotal)} ${currency}</div></div>
+      <div><div class="label">💳 شبكة</div><div class="value">${fmt(networkTotal)} ${currency}</div></div>
+      <div><div class="label">🔒 الخزنة</div><div class="value">${fmt(safeTotal)} ${currency}</div></div>
+    </div>
+    <h2 style="font-size:15px; margin-bottom:8px;">📊 ملخص شهر ${monthArabicName}</h2>
+    <div class="balances" style="margin-bottom:24px;">
+      <div><div class="label">📈 إيرادات ${monthArabicName}</div><div class="value" style="color:#0f9d6e;">${fmt(monthIncome)} ${currency}</div></div>
+      <div><div class="label">📉 مصروفات ${monthArabicName}</div><div class="value" style="color:#d64545;">${fmt(monthExpense)} ${currency}</div></div>
+      <div><div class="label">🏦 صافي ربح الشهر</div><div class="value" style="color:#3B82F6;">${fmt(monthNet)} ${currency}</div></div>
+      <div><div class="label">↗ سحوبات الشهر</div><div class="value" style="color:#b8860b;">${fmt(monthWithdraw)} ${currency}</div></div>
+    </div>
+    ${reportSection("المناديب والموردين", "🚚", ["الاسم", "الجوال", "دين جديد", "مسدد", "رجيع", "الباقي عليك"], supplierRowsHtml, "لا يوجد مناديب أو موردين مسجلين", "إجمالي المستحق للموردين", totalSupplierDebt, "#b8860b")}
+    ${reportSection("الموظفين", "🧑‍🔧", ["الاسم", "الجوال", "الراتب الشهري", "المأخوذ هذا الشهر", "المأخوذ كل الوقت", "الباقي له هذا الشهر"], employeeRowsHtml, "لا يوجد موظفين مسجلين", "إجمالي الرواتب المتبقية", totalSalaryRemaining, "#3B82F6")}
+    ${includePartners ? reportSection("السحوبات (الشركاء)", "💸", ["الاسم", "النسبة", "إجمالي المسحوب"], partnerRowsHtml, "لا يوجد شركاء مسجلين أو سحوبات", "إجمالي السحوبات", totalWithdrawn, "#d64545") : ""}
+  </body></html>`;
+
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+}
+
 function printInvoice(shopName, invoice, currency) {
   const rows = invoice.items.map((it, i) => `<tr><td>${i + 1}</td><td>${it.name}</td><td>${it.qty}</td><td>${fmt(it.unitCost)}</td><td>${fmt(it.lineTotal)}</td></tr>`).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>فاتورة ${invoice.invoiceNo}</title>
@@ -1165,6 +1261,10 @@ function App() {
     downloadFile(`تقفيلة-${dateStr}.csv`, rows.map(r => r.map(csvEscape).join(",")).join("\n"));
   }
 
+  function exportSummaryReport(includePartners) {
+    buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, includePartners);
+  }
+
   function exportBackup() {
     const backup = { ...data, __backupInfo: { app: "shop-finance-app", exportedAt: new Date().toISOString(), version: 1 } };
     downloadFile(`نسخة-احتياطية-${data.settings.shopName}-${todayISO()}.json`, JSON.stringify(backup, null, 2), "application/json;charset=utf-8;");
@@ -1242,7 +1342,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={exportSummaryReport} />
         )}
       </div>
 
@@ -1292,7 +1392,7 @@ function App() {
 
 function TopBar({ shopName, balance, currency, cashTotal, onOpenCashLog, networkTotal, onOpenNetworkLog, safeTotal, onOpenSafeLog }) {
   return (
-    <div className="px-5 pt-6 pb-5 bg-[#12213B] text-white rounded-b-3xl shadow-sm">
+    <div className="px-5 pt-6 pb-5 bg-[#1C1C1E] text-white rounded-b-3xl shadow-sm">
       <div className="text-xs text-white/60 mb-1">{shopName}</div>
       <div className="flex items-end justify-between mb-3">
         <div>
@@ -1593,7 +1693,7 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
   const recent = data.transactions.slice(0, 6);
   return (
     <div className="space-y-4">
-      <button onClick={onOpenQuickDaily} className="w-full bg-[#12213B] text-white rounded-2xl p-4 flex items-center justify-between shadow-sm">
+      <button onClick={onOpenQuickDaily} className="w-full bg-[#1C1C1E] text-white rounded-2xl p-4 flex items-center justify-between shadow-sm">
         <div className="text-right">
           <div className="font-semibold text-sm">📝 إدخال يومية سريعة</div>
           <div className="text-[11px] text-white/60">مبيعات، مصروفات، تسديد مندوب، كاش وشبكة اليوم — بضغطة وحدة</div>
@@ -1950,11 +2050,11 @@ function Reports({ data, monthTotals, yearTotals, curYear, initialBalance, expor
               </button>
               {openMonth === m.mKey && (
                 <div className="px-3 pb-3 pt-1 bg-slate-50">
-                  <div className="grid grid-cols-2 gap-2 text-xs mb-2">
-                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">إيرادات</span><span className="font-semibold num text-emerald-600">{fmt(m.income)}</span></div>
-                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">مصروفات</span><span className="font-semibold num text-red-500">{fmt(m.expense)}</span></div>
-                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">سحوبات</span><span className="font-semibold num text-amber-600">{fmt(m.withdraw)}</span></div>
-                    <div className="flex justify-between bg-white rounded-lg px-2 py-1.5"><span className="text-slate-400">رصيد نهاية الشهر</span><span className="font-semibold num">{fmt(m.endBalance)}</span></div>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <StatCard icon="📈" color="#0f9d6e" label="إيرادات الشهر" value={m.income} currency={data.settings.currency} />
+                    <StatCard icon="📉" color="#d64545" label="مصروفات الشهر" value={m.expense} currency={data.settings.currency} />
+                    <StatCard icon="↗" color="#b8860b" label="سحوبات الشهر" value={m.withdraw} currency={data.settings.currency} />
+                    <StatCard icon="💰" color="#3B82F6" label="رصيد نهاية الشهر" value={m.endBalance} currency={data.settings.currency} />
                   </div>
                   <button onClick={() => exportMonthCSV(m.mKey, m.name + "-" + year)} className="text-[11px] text-slate-500 flex items-center gap-1 mb-2">⬇ تصدير هذا الشهر</button>
                   <div className="divide-y divide-slate-100 bg-white rounded-lg">
@@ -2408,46 +2508,6 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
             <div className={`text-lg font-bold num ${totalDebt > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(totalDebt)} {data.settings.currency}</div>
           </div>
           <span className="text-2xl">🚚</span>
-        </div>
-      )}
-
-      {data.suppliers.length > 0 && (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs min-w-[480px]">
-              <thead>
-                <tr className="border-b border-slate-100 text-slate-400">
-                  <th className="text-right font-medium py-2 px-3">الاسم</th>
-                  <th className="text-right font-medium py-2 px-3">الجوال</th>
-                  <th className="text-right font-medium py-2 px-3">دين جديد</th>
-                  <th className="text-right font-medium py-2 px-3">مسدد/رجيع</th>
-                  <th className="text-right font-medium py-2 px-3">الباقي عليك</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.suppliers.map(s => {
-                  const debtTotal = s.entries.filter(e => e.type === "debt").reduce((sum, e) => sum + e.amount, 0);
-                  const paidReturnTotal = s.entries.filter(e => e.type !== "debt").reduce((sum, e) => sum + e.amount, 0);
-                  const remaining = debtTotal - paidReturnTotal;
-                  return (
-                    <tr key={s.id} className="border-b border-slate-50">
-                      <td className="py-2 px-3 font-medium">{s.name}</td>
-                      <td className="py-2 px-3 text-slate-400">{s.phone || "—"}</td>
-                      <td className="py-2 px-3 num text-amber-600 font-semibold">{fmt(debtTotal)}</td>
-                      <td className="py-2 px-3 num text-emerald-600 font-semibold">{fmt(paidReturnTotal)}</td>
-                      <td className={`py-2 px-3 num font-bold ${remaining > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(remaining)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={4} className="py-2.5 px-3 font-bold text-slate-700">إجمالي المستحق للموردين</td>
-                  <td className={`py-2.5 px-3 num font-bold ${totalDebt > 0 ? "text-red-500" : "text-emerald-600"}`}>{fmt(totalDebt)} {data.settings.currency}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
         </div>
       )}
 
@@ -3220,13 +3280,14 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup }) {
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
   const [newIncomeCat, setNewIncomeCat] = useState("");
   const [newExpenseCat, setNewExpenseCat] = useState("");
   const [confirmImport, setConfirmImport] = useState(null);
+  const [includePartnersInReport, setIncludePartnersInReport] = useState(true);
   const fileInputRef = useRef(null);
 
   function handleFilePicked(e) {
@@ -3242,6 +3303,16 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
         <Field label="اسم المحل"><input value={shopName} onChange={e => setShopName(e.target.value)} onBlur={() => onUpdateSettings({ shopName })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="العملة"><input value={currency} onChange={e => setCurrency(e.target.value)} onBlur={() => onUpdateSettings({ currency })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
         <Field label="الرصيد الابتدائي"><input type="number" value={initialBalance} onChange={e => setInitialBalance(e.target.value)} onBlur={() => onUpdateSettings({ initialBalance: Number(initialBalance || 0) })} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-1">تقرير PDF شامل</div>
+        <div className="text-[11px] text-slate-400 mb-3">تقرير مرتب وقابل للطباعة/الحفظ كـ PDF يوضح المبلغ والباقي لكل مندوب ومورد، وكل موظف، وأرصدة الكاش والشبكة والخزنة الحالية.</div>
+        <label className="flex items-center gap-2 text-xs text-slate-600 mb-3">
+          <input type="checkbox" checked={includePartnersInReport} onChange={e => setIncludePartnersInReport(e.target.checked)} className="w-4 h-4" />
+          تضمين سحوبات الشركاء بالتقرير
+        </label>
+        <button onClick={() => onExportSummary(includePartnersInReport)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold">🧾 عرض/طباعة التقرير الشامل</button>
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
@@ -3447,7 +3518,7 @@ function BottomNav({ tab, setTab }) {
         return (
           <button key={it.id} onClick={() => setTab(it.id)} className="flex flex-col items-center gap-0.5 px-2 py-1">
             <span className="text-base" style={{ opacity: active ? 1 : 0.55 }}>{it.icon}</span>
-            <span className={`text-[10px] ${active ? "text-[#12213B] font-semibold" : "text-slate-400"}`}>{it.label}</span>
+            <span className={`text-[10px] ${active ? "text-[#1C1C1E] font-semibold" : "text-slate-400"}`}>{it.label}</span>
           </button>
         );
       })}
