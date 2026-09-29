@@ -5,5 +5,6 @@
 ## الاستخدام
 افتح الرابط التالي مباشرة من أي متصفح:
 https://moh33albolihi-create.github.io/shop-finance-app/
+index.html
 
 البيانات تُحفظ محليًا في متصفحك فقط (localStorage) ولا يتم رفعها لأي خادم.
