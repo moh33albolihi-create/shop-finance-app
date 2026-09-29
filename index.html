@@ -844,7 +844,8 @@ function App() {
       networkLog = [{ id: uid(), date: payload.date, type: "add", kind: "manual", amount: Number(payload.networkToday), notes: "يومية سريعة", createdAt: new Date().toISOString() }, ...networkLog];
     }
     if (payload.cashToday !== "" && payload.cashToday != null) {
-      const currentCash = data.cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
+      // Reconcile the entered end-of-day cash after today's linked expenses.
+      const currentCash = cashLog.reduce((s, e) => s + (e.type === "deduct" ? -e.amount : e.amount), 0);
       const delta = Number(payload.cashToday) - currentCash;
       if (delta !== 0) {
         cashLog = [{ id: uid(), date: payload.date, type: delta >= 0 ? "add" : "deduct", kind: "manual", amount: Math.abs(delta), notes: "تحديث كاش اليوم (يومية سريعة)", createdAt: new Date().toISOString() }, ...cashLog];
@@ -975,16 +976,19 @@ function App() {
     });
 
     let transactions = data.transactions;
+    let cashLog = data.cashLog;
     let suppliers = data.suppliers;
-    let linkedTxId = null, linkedEntryId = null;
+    let linkedTxId = null, linkedEntryId = null, linkedCashEntryId = null;
     const itemsSummary = payload.items.map(it => `${it.name} × ${it.qty}`).join("، ");
 
     if (payload.paymentType === "cash") {
       linkedTxId = uid();
+      linkedCashEntryId = uid();
       transactions = [{
         id: linkedTxId, type: "expense", title: `فاتورة مشتريات${payload.supplierName ? " - " + payload.supplierName : ""}`,
-        category: "مشتريات", amount: total, date: payload.date, notes: itemsSummary, createdAt: new Date().toISOString(),
+        category: "مشتريات", amount: total, date: payload.date, notes: itemsSummary, linkedCashEntryId, createdAt: new Date().toISOString(),
       }, ...transactions];
+      cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", kind: "expense", amount: total, notes: `فاتورة مشتريات: ${itemsSummary}`, linkedTxId, createdAt: new Date().toISOString() }, ...cashLog];
     } else if (payload.supplierId) {
       linkedEntryId = uid();
       suppliers = suppliers.map(s => s.id === payload.supplierId ? {
@@ -995,10 +999,10 @@ function App() {
     const invoice = {
       id: uid(), invoiceNo: (data.purchaseInvoices.length + 1), supplierId: payload.supplierId || null, supplierName: payload.supplierName || "",
       date: payload.date, items: payload.items.map(it => ({ name: it.name.trim(), qty: Number(it.qty), unitCost: Number(it.unitCost), lineTotal: Number(it.qty) * Number(it.unitCost) })),
-      total, paymentType: payload.paymentType, linkedTxId, linkedEntryId, notes: payload.notes || "", returns: [], createdAt: new Date().toISOString(),
+      total, paymentType: payload.paymentType, linkedTxId, linkedEntryId, linkedCashEntryId, notes: payload.notes || "", returns: [], createdAt: new Date().toISOString(),
     };
 
-    persist({ ...data, inventory, transactions, suppliers, purchaseInvoices: [invoice, ...data.purchaseInvoices] });
+    persist({ ...data, inventory, transactions, cashLog, suppliers, purchaseInvoices: [invoice, ...data.purchaseInvoices] });
     showToast("تم حفظ الفاتورة وتحديث المخزون");
   }
 
@@ -1015,7 +1019,9 @@ function App() {
       if (ret.linkedTxId) transactions = transactions.filter(t => t.id !== ret.linkedTxId);
       if (ret.linkedEntryId && inv.supplierId) suppliers = suppliers.map(s => s.id === inv.supplierId ? { ...s, entries: s.entries.filter(e => e.id !== ret.linkedEntryId) } : s);
     });
-    persist({ ...data, transactions, suppliers, purchaseInvoices: data.purchaseInvoices.filter(i => i.id !== id) });
+    const cashEntryIds = [inv.linkedCashEntryId, ...(inv.returns || []).map(ret => ret.linkedCashEntryId)].filter(Boolean);
+    const cashLog = data.cashLog.filter(e => !cashEntryIds.includes(e.id));
+    persist({ ...data, transactions, cashLog, suppliers, purchaseInvoices: data.purchaseInvoices.filter(i => i.id !== id) });
     showToast("تم حذف الفاتورة (الكميات المضافة للمخزون تبقى كما هي)");
   }
 
@@ -1030,16 +1036,19 @@ function App() {
     });
 
     let transactions = data.transactions;
+    let cashLog = data.cashLog;
     let suppliers = data.suppliers;
-    let linkedTxId = null, linkedEntryId = null;
+    let linkedTxId = null, linkedEntryId = null, linkedCashEntryId = null;
     const itemsSummary = payload.items.map(it => `${it.name} × ${it.qty}`).join("، ");
 
     if (invoice.paymentType === "cash") {
       linkedTxId = uid();
+      linkedCashEntryId = uid();
       transactions = [{
         id: linkedTxId, type: "income", title: `مرتجع فاتورة #${invoice.invoiceNo}`, category: "مرتجع مشتريات",
-        amount: total, date: payload.date, notes: itemsSummary, createdAt: new Date().toISOString(),
+        amount: total, date: payload.date, notes: itemsSummary, linkedCashEntryId, createdAt: new Date().toISOString(),
       }, ...transactions];
+      cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "add", kind: "expense", amount: total, notes: `مرتجع فاتورة #${invoice.invoiceNo}`, linkedTxId, createdAt: new Date().toISOString() }, ...cashLog];
     } else if (invoice.supplierId) {
       linkedEntryId = uid();
       suppliers = suppliers.map(s => s.id === invoice.supplierId ? {
@@ -1049,11 +1058,11 @@ function App() {
 
     const ret = {
       id: uid(), date: payload.date, items: payload.items.map(it => ({ name: it.name.trim(), qty: Number(it.qty), unitCost: Number(it.unitCost), lineTotal: Number(it.qty) * Number(it.unitCost) })),
-      total, notes: payload.notes || "", linkedTxId, linkedEntryId, createdAt: new Date().toISOString(),
+      total, notes: payload.notes || "", linkedTxId, linkedEntryId, linkedCashEntryId, createdAt: new Date().toISOString(),
     };
 
     persist({
-      ...data, inventory, transactions, suppliers,
+      ...data, inventory, transactions, cashLog, suppliers,
       purchaseInvoices: data.purchaseInvoices.map(i => i.id === invoiceId ? { ...i, returns: [ret, ...(i.returns || [])] } : i),
     });
     showToast("تم تسجيل الرجيع وتحديث المخزون");
@@ -1074,7 +1083,7 @@ function App() {
       suppliers = suppliers.map(s => s.id === invoice.supplierId ? { ...s, entries: s.entries.filter(e => e.id !== ret.linkedEntryId) } : s);
     }
     persist({
-      ...data, inventory, transactions, suppliers,
+      ...data, inventory, transactions, cashLog: ret.linkedCashEntryId ? data.cashLog.filter(e => e.id !== ret.linkedCashEntryId) : data.cashLog, suppliers,
       purchaseInvoices: data.purchaseInvoices.map(i => i.id === invoiceId ? { ...i, returns: (i.returns || []).filter(r => r.id !== returnId) } : i),
     });
     showToast("تم إلغاء الرجيع وإرجاع الكمية للمخزون");
@@ -1292,7 +1301,7 @@ function App() {
 
   return (
     <div dir="rtl" className="min-h-[700px] bg-[#F6F7F9] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
-      <TopBar shopName={data.settings.shopName} balance={totals.balance} currency={data.settings.currency}
+      <TopBar shopName={data.settings.shopName} balance={cashTotal + networkTotal + safeTotal} currency={data.settings.currency}
         cashTotal={cashTotal} onOpenCashLog={() => setCashLogOpen(true)}
         networkTotal={networkTotal} onOpenNetworkLog={() => setNetworkLogOpen(true)}
         safeTotal={safeTotal} onOpenSafeLog={() => setSafeLogOpen(true)} />
@@ -1396,7 +1405,7 @@ function TopBar({ shopName, balance, currency, cashTotal, onOpenCashLog, network
       <div className="text-xs text-white/60 mb-1">{shopName}</div>
       <div className="flex items-end justify-between mb-3">
         <div>
-          <div className="text-xs text-white/60 mb-1">الرصيد الحالي</div>
+          <div className="text-xs text-white/60 mb-1">إجمالي الأرصدة (كاش + شبكة + خزنة)</div>
           <div className="text-3xl font-bold num tracking-tight">{fmt(balance)} <span className="text-base font-normal text-white/70">{currency}</span></div>
         </div>
         <span className="text-3xl">💰</span>
@@ -1730,9 +1739,9 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
 function QuickDailyModal({ data, onClose, onSave }) {
   const [date, setDate] = useState(todayISO());
   const [sales, setSales] = useState([{ amount: "", category: "", notes: "" }]);
-  const [expenses, setExpenses] = useState([{ amount: "", category: "", notes: "", paymentSource: "none" }]);
-  const [supplierPayments, setSupplierPayments] = useState([{ supplierId: "", amount: "", paymentSource: "none" }]);
-  const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "", paymentSource: "none" }]);
+  const [expenses, setExpenses] = useState([{ amount: "", category: "", notes: "", paymentSource: "cash" }]);
+  const [supplierPayments, setSupplierPayments] = useState([{ supplierId: "", amount: "", paymentSource: "cash" }]);
+  const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "", paymentSource: "cash" }]);
   const [cashToday, setCashToday] = useState("");
   const [networkToday, setNetworkToday] = useState("");
   const [err, setErr] = useState("");
@@ -1742,15 +1751,15 @@ function QuickDailyModal({ data, onClose, onSave }) {
   function removeSaleRow(idx) { setSales(sales.filter((_, i) => i !== idx)); }
 
   function updateExpense(idx, patch) { setExpenses(expenses.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
-  function addExpenseRow() { setExpenses([...expenses, { amount: "", category: "", notes: "", paymentSource: "none" }]); }
+  function addExpenseRow() { setExpenses([...expenses, { amount: "", category: "", notes: "", paymentSource: "cash" }]); }
   function removeExpenseRow(idx) { setExpenses(expenses.filter((_, i) => i !== idx)); }
 
   function updateSupplier(idx, patch) { setSupplierPayments(supplierPayments.map((s, i) => i === idx ? { ...s, ...patch } : s)); }
-  function addSupplierRow() { setSupplierPayments([...supplierPayments, { supplierId: "", amount: "", paymentSource: "none" }]); }
+  function addSupplierRow() { setSupplierPayments([...supplierPayments, { supplierId: "", amount: "", paymentSource: "cash" }]); }
   function removeSupplierRow(idx) { setSupplierPayments(supplierPayments.filter((_, i) => i !== idx)); }
 
   function updateEmployee(idx, patch) { setEmployeePayments(employeePayments.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
-  function addEmployeeRow() { setEmployeePayments([...employeePayments, { employeeId: "", amount: "", paymentSource: "none" }]); }
+  function addEmployeeRow() { setEmployeePayments([...employeePayments, { employeeId: "", amount: "", paymentSource: "cash" }]); }
   function removeEmployeeRow(idx) { setEmployeePayments(employeePayments.filter((_, i) => i !== idx)); }
 
   function save() {
@@ -2600,7 +2609,7 @@ function SupplierEntryModal({ supplier, type, currency, onClose, onSave }) {
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
   const [notes, setNotes] = useState("");
-  const [paymentSource, setPaymentSource] = useState("none");
+  const [paymentSource, setPaymentSource] = useState("cash");
   const [err, setErr] = useState("");
   const isPayment = type === "payment";
   function save() {
@@ -3251,7 +3260,7 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
   const [notes, setNotes] = useState("");
-  const [paymentSource, setPaymentSource] = useState("none");
+  const [paymentSource, setPaymentSource] = useState("cash");
   const [err, setErr] = useState("");
   function save() {
     const v = Number(amount);
@@ -3369,7 +3378,7 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
   const [date, setDate] = useState(initial?.date || todayISO());
   const [notes, setNotes] = useState(initial?.notes || "");
   const [reason, setReason] = useState(initial?.notes || "");
-  const [paymentSource, setPaymentSource] = useState(initial?.linkedCashEntryId ? "cash" : initial?.linkedNetworkEntryId ? "network" : initial?.linkedSafeEntryId ? "safe" : "none");
+  const [paymentSource, setPaymentSource] = useState(initial ? (initial.linkedCashEntryId ? "cash" : initial.linkedNetworkEntryId ? "network" : initial.linkedSafeEntryId ? "safe" : "none") : "cash");
   const [err, setErr] = useState("");
   const cats = type === "income" ? categories.income : type === "expense" ? categories.expense : [];
 
@@ -3431,7 +3440,7 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
       )}
       {type === "expense" && (
         <div className="mb-3">
-          <div className="text-[11px] text-slate-400 mb-1">ادفعها من (اختياري، يخصم تلقائيًا من السجل المناسب)</div>
+          <div className="text-[11px] text-slate-400 mb-1">ادفعها من (الكاش محدد تلقائيًا، ويمكن تغييره)</div>
           <div className="grid grid-cols-2 gap-2">
             <button type="button" onClick={() => setPaymentSource("none")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
             <button type="button" onClick={() => setPaymentSource("cash")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "cash" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>💵 كاش</button>
