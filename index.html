@@ -171,6 +171,54 @@ function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, in
   return true;
 }
 
+function escapeReportHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
+
+function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
+  const emp = data.employees.find(e => e.id === employeeId);
+  if (!emp) return false;
+  const entries = (emp.entries || [])
+    .filter(e => !reportMonth || (e.date || "").slice(0, 7) === reportMonth)
+    .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const total = entries.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const salary = Number(emp.monthlySalary || 0);
+  const currency = escapeReportHtml(data.settings.currency);
+  const rows = entries.map((e, i) => `<tr><td>${i + 1}</td><td>${escapeReportHtml(e.date)}</td><td>${escapeReportHtml(e.notes || "—")}</td><td>${fmt(e.amount)} ${currency}</td></tr>`).join("");
+  const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
+    <title>تقرير سحوبات ${escapeReportHtml(emp.name)} ${reportMonth || "كل الفترات"}</title>
+    <style>
+      body{font-family:Tahoma,Arial,sans-serif;color:#1e293b;padding:28px;line-height:1.6}
+      h1{font-size:21px;margin:0 0 4px}.sub{color:#64748b;margin-bottom:22px;font-size:13px}
+      .summary{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+      .summary div{border:1px solid #e2e8f0;border-radius:9px;padding:8px 14px;font-size:13px}
+      .summary strong{display:block;font-size:17px}
+      table{width:100%;border-collapse:collapse}th,td{border:1px solid #e2e8f0;padding:8px;text-align:right;font-size:13px}
+      th{background:#f8fafc}tfoot td{font-weight:bold;background:#f8fafc}
+      @media print{body{padding:12px}thead{display:table-header-group}tr{break-inside:avoid}}
+    </style></head><body>
+    <h1>تقرير سحوبات الموظف: ${escapeReportHtml(emp.name)}</h1>
+    <div class="sub">${escapeReportHtml(data.settings.shopName)} · ${reportMonth ? "شهر " + escapeReportHtml(reportMonth) : "جميع الفترات"} · تاريخ الإصدار ${todayISO()}</div>
+    <div class="summary">
+      ${reportMonth ? `<div>الراتب الشهري<strong>${fmt(salary)} ${currency}</strong></div>` : ""}
+      <div>إجمالي السحوبات<strong>${fmt(total)} ${currency}</strong></div>
+      ${reportMonth ? `<div>${salary - total >= 0 ? "الباقي من الراتب" : "زيادة على الراتب"}<strong>${fmt(Math.abs(salary - total))} ${currency}</strong></div>` : ""}
+    </div>
+    <table><thead><tr><th>#</th><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4">لا توجد سحوبات في هذه الفترة</td></tr>`}</tbody>
+      <tfoot><tr><td colspan="3">الإجمالي</td><td>${fmt(total)} ${currency}</td></tr></tfoot>
+    </table></body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+  return true;
+}
+
 function printInvoice(shopName, invoice, currency) {
   const rows = invoice.items.map((it, i) => `<tr><td>${i + 1}</td><td>${it.name}</td><td>${it.qty}</td><td>${fmt(it.unitCost)}</td><td>${fmt(it.lineTotal)}</td></tr>`).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>فاتورة ${invoice.invoiceNo}</title>
@@ -1274,6 +1322,10 @@ function App() {
     buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, includePartners);
   }
 
+  function exportEmployeeReport(employeeId, reportMonth) {
+    return buildAndPrintEmployeeReport(data, employeeId, reportMonth);
+  }
+
   function exportBackup() {
     const backup = { ...data, __backupInfo: { app: "shop-finance-app", exportedAt: new Date().toISOString(), version: 1 } };
     downloadFile(`نسخة-احتياطية-${data.settings.shopName}-${todayISO()}.json`, JSON.stringify(backup, null, 2), "application/json;charset=utf-8;");
@@ -1351,7 +1403,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={exportSummaryReport} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={exportSummaryReport} onExportEmployeeReport={exportEmployeeReport} />
         )}
       </div>
 
@@ -3289,7 +3341,7 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary }) {
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary, onExportEmployeeReport }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
@@ -3297,6 +3349,9 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
   const [newExpenseCat, setNewExpenseCat] = useState("");
   const [confirmImport, setConfirmImport] = useState(null);
   const [includePartnersInReport, setIncludePartnersInReport] = useState(true);
+  const [reportEmployeeId, setReportEmployeeId] = useState("");
+  const [reportMonth, setReportMonth] = useState(todayISO().slice(0, 7));
+  const [allEmployeeMonths, setAllEmployeeMonths] = useState(false);
   const fileInputRef = useRef(null);
 
   function handleFilePicked(e) {
@@ -3322,6 +3377,19 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
           تضمين سحوبات الشركاء بالتقرير
         </label>
         <button onClick={() => onExportSummary(includePartnersInReport)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold">🧾 عرض/طباعة التقرير الشامل</button>
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3">
+        <div className="font-semibold text-sm">تقرير سحوبات موظف</div>
+        <select value={reportEmployeeId} onChange={e => setReportEmployeeId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm" aria-label="اختر الموظف">
+          <option value="">اختر الموظف</option>
+          {data.employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+        </select>
+        <div className="flex items-center gap-3">
+          <input type="month" value={reportMonth} onChange={e => setReportMonth(e.target.value)} disabled={allEmployeeMonths} className="flex-1 min-w-0 bg-slate-50 rounded-xl py-2.5 px-3 text-sm disabled:opacity-50" aria-label="شهر التقرير" />
+          <label className="flex items-center gap-1 text-xs whitespace-nowrap"><input type="checkbox" checked={allEmployeeMonths} onChange={e => setAllEmployeeMonths(e.target.checked)} /> كل الفترات</label>
+        </div>
+        <button disabled={!reportEmployeeId || (!allEmployeeMonths && !reportMonth)} onClick={() => onExportEmployeeReport(reportEmployeeId, allEmployeeMonths ? "" : reportMonth)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold disabled:opacity-40">🧾 عرض/طباعة تقرير الموظف</button>
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
