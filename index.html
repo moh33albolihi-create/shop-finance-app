@@ -1758,8 +1758,25 @@ function SafeLogModal({ log, currency, total, cashTotal, networkTotal, categorie
   );
 }
 
+function expenseSourceLabel(data,t) {
+  if (t.nonCash) return "فاتورة أو دين آجل";
+  if ((data.cashLog || []).some(e => e.linkedTxId === t.id && e.type === "deduct")) return "خُصم من الكاش";
+  if ((data.networkLog || []).some(e => e.linkedTxId === t.id && e.type === "deduct")) return "خُصم من الشبكة";
+  if ((data.safeLog || []).some(e => e.linkedTxId === t.id && e.type === "deduct")) return "خُصم من الخزنة";
+  return "غير مربوط بخصم من الأرصدة";
+}
+
 function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickDaily }) {
   const mt = monthTotals(curMonth);
+  const [showExpenses, setShowExpenses] = useState(false);
+  const monthExpenses = profitMovements(data)
+    .filter(t => t.type === "expense" && monthKey(t.date) === curMonth)
+    .slice().sort((a, b) => b.date.localeCompare(a.date));
+  const expenseGroups = Object.entries(monthExpenses.reduce((result, t) => {
+    const category = t.category || "بدون تصنيف";
+    result[category] = (result[category] || 0) + Number(t.amount || 0);
+    return result;
+  }, {})).sort((a, b) => b[1] - a[1]);
   const recent = data.transactions.slice(0, 6);
   return (
     <div className="space-y-4">
@@ -1772,7 +1789,9 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
       </button>
       <div className="grid grid-cols-2 gap-3">
         <StatCard icon="📈" color="#0f9d6e" label={`إيرادات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.income} currency={data.settings.currency} />
-        <StatCard icon="📉" color="#d64545" label={`مصروفات ${AR_MONTHS[new Date().getMonth()]}`} value={mt.expense} currency={data.settings.currency} />
+        <button type="button" onClick={() => setShowExpenses(true)} className="text-right rounded-2xl focus:outline-none focus:ring-2 focus:ring-red-300" aria-label="عرض تفاصيل مصروفات الشهر">
+          <StatCard icon="📉" color="#d64545" label={"مصروفات " + AR_MONTHS[new Date().getMonth()]} value={mt.expense} currency={data.settings.currency} />
+        </button>
         <StatCard icon="↗" color="#b8860b" label="سحوبات الشهر" value={mt.withdraw} currency={data.settings.currency} />
         <StatCard icon="🏦" color="#3B82F6" label="صافي ربح الشهر" value={mt.net} currency={data.settings.currency} />
       </div>
@@ -1783,6 +1802,32 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
         </div>
         <span className="text-2xl">📊</span>
       </div>
+      {showExpenses && (
+        <Sheet title={"تفاصيل مصروفات " + AR_MONTHS[new Date().getMonth()]} onClose={() => setShowExpenses(false)}>
+          <div className="text-sm font-bold mb-3">الإجمالي: {fmt(mt.expense)} {data.settings.currency}</div>
+          <div className="text-xs text-slate-500 mb-3">الدفعات المسجلة كمصروف تبقى ضمن مصروفات شهرها بعد سدادها. ديون المشتريات الآجلة تدخل في حساب الربح بتاريخها، بينما تسديد الدين لاحقًا لا يدخل مرة ثانية.</div>
+          {expenseGroups.length > 0 && (
+            <div className="bg-slate-50 rounded-xl p-3 mb-3 space-y-1">
+              {expenseGroups.map(([category, amount]) => (
+                <div key={category} className="flex justify-between text-xs"><span>{category}</span><strong className="num">{fmt(amount)} {data.settings.currency}</strong></div>
+              ))}
+            </div>
+          )}
+          <div className="divide-y divide-slate-100 max-h-[55vh] overflow-y-auto">
+            {monthExpenses.length === 0 ? <div className="text-xs text-slate-400 py-4">لا توجد مصروفات لهذا الشهر</div> :
+              monthExpenses.map(t => (
+                <div key={t.id} className="py-2.5">
+                  <div className="flex justify-between gap-2 text-xs font-semibold">
+                    <span>{t.title || t.category || "مصروف"}</span><span className="num whitespace-nowrap">{t.amount < 0 ? "−" : ""}{fmt(Math.abs(t.amount))} {data.settings.currency}</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">{t.date} · {t.category || "بدون تصنيف"} · {t.amount < 0 ? "مرتجع" : expenseSourceLabel(data, t)}</div>
+                  {t.notes && <div className="text-[11px] text-slate-400 mt-0.5">{t.notes}</div>}
+                </div>
+              ))
+            }
+          </div>
+        </Sheet>
+      )}
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
         <div className="font-semibold text-sm mb-3">آخر العمليات</div>
         {recent.length === 0 ? (
