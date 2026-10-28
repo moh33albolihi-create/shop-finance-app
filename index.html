@@ -410,6 +410,47 @@ function loadData() {
   } catch (e) { return DEFAULT_DATA; }
 }
 
+function applyHistoricalCashPatch(data, patch) {
+  if (!patch || patch.app !== "shop-finance-cash-reconciliation-v1" || !Array.isArray(patch.items) || patch.items.length === 0 || patch.items.length > 20) throw Error("ملف التسوية غير صالح");
+  const txMap = new Map(data.transactions.map(t => [t.id, t]));
+  const cashIds = new Set(data.cashLog.map(e => e.id));
+  const seenTx = new Set();
+  let existing = 0;
+  for (const item of patch.items) {
+    if (!item || typeof item.txId !== "string" || typeof item.date !== "string" || !Number.isFinite(item.amount) || item.amount <= 0 || !["supplier", "employee"].includes(item.kind) || typeof item.openingId !== "string" || typeof item.paymentId !== "string" || seenTx.has(item.txId)) throw Error("في ملف التسوية بيانات غير صالحة");
+    seenTx.add(item.txId);
+    const tx = txMap.get(item.txId);
+    if (!tx || tx.type !== "expense" || tx.date !== item.date || Number(tx.amount) !== item.amount || tx.title !== item.title || tx.category !== (item.kind === "employee" ? "رواتب" : "تسديد مناديب")) throw Error("بيانات الدفعات الحالية تختلف عن ملف التسوية؛ لم يتغير شيء");
+    const already = cashIds.has(item.paymentId) && tx.linkedCashEntryId === item.paymentId && cashIds.has(item.openingId);
+    if (already) { existing++; continue; }
+    if (tx.linkedCashEntryId || tx.linkedNetworkEntryId || tx.linkedSafeEntryId ||
+      cashIds.has(item.openingId) || cashIds.has(item.paymentId) ||
+      data.cashLog.some(e => e.linkedTxId === item.txId) ||
+      data.networkLog.some(e => e.linkedTxId === item.txId) ||
+      data.safeLog.some(e => e.linkedTxId === item.txId)) throw Error("إحدى الدفعات مرتبطة مسبقًا برصيد؛ لم يتغير شيء");
+    if (item.kind === "employee" && data.employees.reduce((n, emp) => n + (emp.entries || []).filter(e => e.linkedTxId === item.txId && Number(e.amount) === item.amount).length, 0) !== 1) throw Error("سجل راتب الموظف تغيّر؛ لم يتغير شيء");
+  }
+  if (existing === patch.items.length) return data;
+  if (existing !== 0) throw Error("بعض بنود التسوية طُبقت مسبقًا؛ لم يتغير شيء");
+  const now = new Date().toISOString();
+  const newCashLog = patch.items.flatMap(item => [
+    { id: item.openingId, date: item.date, type: "add", amount: item.amount, kind: "reconciliation",
+      notes: "تسوية رصيد تاريخي لدفعة مسجلة سابقًا؛ ليست مبيعات أو إيرادًا جديدًا",
+      reconciliationTxId: item.txId, createdAt: now },
+    { id: item.paymentId, date: item.date, type: "deduct", amount: item.amount, kind: item.kind,
+      notes: "ربط خصم كاش لدفعة موجودة سابقًا: " + item.title,
+      linkedTxId: item.txId, reconciliationOpeningId: item.openingId, createdAt: now }
+  ]);
+  const linkById = new Map(patch.items.map(item => [item.txId, item.paymentId]));
+  return {
+    ...data,
+    cashLog: [...newCashLog, ...data.cashLog],
+    transactions: data.transactions.map(t => linkById.has(t.id) ? { ...t, linkedCashEntryId: linkById.get(t.id) } : t),
+    employees: data.employees.map(emp => ({ ...emp, entries: (emp.entries || []).map(e =>
+      linkById.has(e.linkedTxId) ? { ...e, linkedCashEntryId: linkById.get(e.linkedTxId) } : e) }))
+  };
+}
+
 function App() {
   const [data, setData] = useState(loadData);
   const [tab, setTab] = useState("dashboard");
@@ -566,7 +607,7 @@ function App() {
     let employees = data.employees;
     if (entry?.linkedTxId) {
       transactions = transactions.filter(t => t.id !== entry.linkedTxId);
-      suppliers = suppliers.map(s => ({ ...s, entries: s.entries.filter(e2 => e2.linkedCashEntryId !== id) }));
+      suppliers = suppliers.map(s => ({ ...s, entries: s.entries.filter(e2 => e2.linkedCashEntryId !== id && e2.linkedTxId !== entry.linkedTxId) }));
       employees = employees.map(e => ({ ...e, entries: e.entries.filter(e2 => e2.linkedCashEntryId !== id) }));
     }
     persist({ ...data, cashLog: data.cashLog.filter(e => e.id !== id), transactions, suppliers, employees });
@@ -1285,7 +1326,7 @@ function App() {
     const entry = supplier?.entries.find(e => e.id === entryId);
     const transactions = entry?.linkedTxId ? data.transactions.filter(t => t.id !== entry.linkedTxId) : data.transactions;
     const networkLog = entry?.linkedNetworkEntryId ? data.networkLog.filter(e => e.id !== entry.linkedNetworkEntryId) : data.networkLog;
-    const cashLog = entry?.linkedCashEntryId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId) : data.cashLog;
+    const cashLog = entry?.linkedCashEntryId || entry?.linkedTxId ? data.cashLog.filter(e => e.id !== entry.linkedCashEntryId && (!entry.linkedTxId || e.linkedTxId !== entry.linkedTxId)) : data.cashLog;
     const safeLog = entry?.linkedSafeEntryId ? data.safeLog.filter(e => e.id !== entry.linkedSafeEntryId) : data.safeLog;
     persist({
       ...data, transactions, networkLog, cashLog, safeLog,
@@ -1339,6 +1380,22 @@ function App() {
     const backup = { ...data, __backupInfo: { app: "shop-finance-app", exportedAt: new Date().toISOString(), version: 1 } };
     downloadFile(`نسخة-احتياطية-${data.settings.shopName}-${todayISO()}.json`, JSON.stringify(backup, null, 2), "application/json;charset=utf-8;");
     showToast("تم تنزيل النسخة الاحتياطية");
+  }
+
+  function importCashPatch(file) {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const patch = JSON.parse(event.target.result);
+        const next = applyHistoricalCashPatch(data, patch);
+        if (next === data) return showToast("هذه التسوية مطبقة مسبقًا");
+        persist(next);
+        showToast("تم ربط الدفعات القديمة دون تغيير الأرصدة أو المصروفات");
+      } catch (error) {
+        showToast(error.message || "ملف التسوية غير صالح", "error");
+      }
+    };
+    reader.readAsText(file);
   }
 
   function importBackup(file) {
@@ -1412,7 +1469,7 @@ function App() {
           <Partners data={data} totals={totals} onSave={upsertPartner} onDelete={deletePartner} />
         )}
         {tab === "settings" && (
-          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={exportSummaryReport} onExportEmployeeReport={exportEmployeeReport} />
+          <SettingsPage data={data} onUpdateSettings={updateSettings} onAddCategory={addCategory} onRemoveCategory={removeCategory} onExportBackup={exportBackup} onImportBackup={importBackup} onExportSummary={exportSummaryReport} onExportEmployeeReport={exportEmployeeReport} onImportCashPatch={importCashPatch} />
         )}
       </div>
 
@@ -3392,18 +3449,20 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   );
 }
 
-function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary, onExportEmployeeReport }) {
+function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory, onExportBackup, onImportBackup, onExportSummary, onExportEmployeeReport, onImportCashPatch }) {
   const [shopName, setShopName] = useState(data.settings.shopName);
   const [currency, setCurrency] = useState(data.settings.currency);
   const [initialBalance, setInitialBalance] = useState(data.settings.initialBalance);
   const [newIncomeCat, setNewIncomeCat] = useState("");
   const [newExpenseCat, setNewExpenseCat] = useState("");
   const [confirmImport, setConfirmImport] = useState(null);
+  const [confirmCashPatch, setConfirmCashPatch] = useState(null);
   const [includePartnersInReport, setIncludePartnersInReport] = useState(true);
   const [reportEmployeeId, setReportEmployeeId] = useState("");
   const [reportMonth, setReportMonth] = useState(todayISO().slice(0, 7));
   const [allEmployeeMonths, setAllEmployeeMonths] = useState(false);
   const fileInputRef = useRef(null);
+  const cashPatchRef = useRef(null);
 
   function handleFilePicked(e) {
     const file = e.target.files[0];
@@ -3441,6 +3500,21 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
           <label className="flex items-center gap-1 text-xs whitespace-nowrap"><input type="checkbox" checked={allEmployeeMonths} onChange={e => setAllEmployeeMonths(e.target.checked)} /> كل الفترات</label>
         </div>
         <button disabled={!reportEmployeeId || (!allEmployeeMonths && !reportMonth)} onClick={() => onExportEmployeeReport(reportEmployeeId, allEmployeeMonths ? "" : reportMonth)} className="w-full bg-slate-800 text-white rounded-xl py-2.5 text-xs font-semibold disabled:opacity-40">🧾 عرض/طباعة تقرير الموظف</button>
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+        <div className="font-semibold text-sm mb-2">تسوية دفعات قديمة</div>
+        <button onClick={() => cashPatchRef.current.click()} className="w-full border border-slate-200 rounded-xl py-2.5 text-xs font-semibold">استيراد ملف تسوية الكاش</button>
+        <input ref={cashPatchRef} type="file" accept="application/json,.json" className="hidden" onChange={e => { if (e.target.files[0]) setConfirmCashPatch(e.target.files[0]); e.target.value = ""; }} />
+        {confirmCashPatch && (
+          <div className="mt-3 bg-amber-50 rounded-xl p-3 text-xs">
+            <div className="mb-2">سيُربط خصم الدفعات الموجودة بالكاش مع تسوية مقابلة، دون إضافة مصروف جديد أو تغيير الرصيد الحالي. {confirmCashPatch.name}</div>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmCashPatch(null)} className="flex-1 border border-slate-200 rounded-xl py-2">إلغاء</button>
+              <button onClick={() => { onImportCashPatch(confirmCashPatch); setConfirmCashPatch(null); }} className="flex-1 bg-slate-800 text-white rounded-xl py-2 font-semibold">تطبيق التسوية</button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
