@@ -922,18 +922,25 @@ function App() {
     });
 
     (payload.employeePayments || []).forEach(ep => {
-      if (!ep.employeeId || !(Number(ep.amount) > 0)) return;
+      if (!ep.employeeId || (!Number.isFinite(Number(ep.amount)) || !(Number(ep.amount) > 0))) return;
       const emp = employees.find(x => x.id === ep.employeeId);
       if (!emp) return;
+      const kind = ep.kind === "deduction" ? "deduction" : "payment";
+      const notes = ["يومية سريعة", kind === "deduction" ? (ep.reason || "خصم") : "دفعة راتب", (ep.notes || "").trim()].filter(Boolean).join(" · ");
+      if (kind === "deduction") {
+        const month = ep.payrollMonth || payload.date.slice(0,7);
+        employees = employees.map(e => e.id === ep.employeeId ? { ...e, entries: [{ id: uid(), kind, amount: Number(ep.amount), date: payload.date, payrollMonth: month, allocations: [{ month, amount: Number(ep.amount) }], reason: ep.reason || "خصم", notes, source: "quickDaily", createdAt: new Date().toISOString() }, ...(e.entries || [])] } : e);
+        return;
+      }
       const txId = uid();
       transactions = [{
         id: txId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
-        amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", createdAt: new Date().toISOString(),
+        amount: Number(ep.amount), date: payload.date, notes, createdAt: new Date().toISOString(),
       }, ...transactions];
       const linkedCashEntryId = uid();
-      cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
+      cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(ep.amount), notes: `راتب: ${emp.name} · ${notes}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
       employees = employees.map(e => e.id === ep.employeeId ? {
-        ...e, entries: [{ id: uid(), amount: Number(ep.amount), date: payload.date, notes: "يومية سريعة", linkedTxId: txId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...e.entries],
+        ...e, entries: [{ id: uid(), kind, source: "quickDaily", amount: Number(ep.amount), date: payload.date, notes, linkedTxId: txId, linkedCashEntryId, createdAt: new Date().toISOString() }, ...(e.entries || [])],
       } : e);
     });
 
@@ -1914,7 +1921,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
   const [sales, setSales] = useState([{ amount: "", category: "", notes: "" }]);
   const [expenses, setExpenses] = useState([{ amount: "", category: "", notes: "" }]);
   const [supplierPayments, setSupplierPayments] = useState([{ supplierId: "", amount: "" }]);
-  const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "" }]);
+  const [employeePayments, setEmployeePayments] = useState([{ employeeId: "", amount: "", kind: "payment", reason: "تأخير", notes: "", payrollMonth: "" }]);
   const [cashToday, setCashToday] = useState("");
   const [networkToday, setNetworkToday] = useState("");
   const [err, setErr] = useState("");
@@ -1932,7 +1939,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
   function removeSupplierRow(idx) { setSupplierPayments(supplierPayments.filter((_, i) => i !== idx)); }
 
   function updateEmployee(idx, patch) { setEmployeePayments(employeePayments.map((e, i) => i === idx ? { ...e, ...patch } : e)); }
-  function addEmployeeRow() { setEmployeePayments([...employeePayments, { employeeId: "", amount: "" }]); }
+  function addEmployeeRow() { setEmployeePayments([...employeePayments, { employeeId: "", amount: "", kind: "payment", reason: "تأخير", notes: "", payrollMonth: "" }]); }
   function removeEmployeeRow(idx) { setEmployeePayments(employeePayments.filter((_, i) => i !== idx)); }
 
   function save() {
@@ -1940,7 +1947,10 @@ function QuickDailyModal({ data, onClose, onSave }) {
     const validSales = sales.filter(s => Number(s.amount) > 0);
     const validExpenses = expenses.filter(e => Number(e.amount) > 0);
     const validSuppliers = supplierPayments.filter(s => s.supplierId && Number(s.amount) > 0);
-    const validEmployees = employeePayments.filter(e => e.employeeId && Number(e.amount) > 0);
+    const filledEmployees = employeePayments.filter(e => e.employeeId || e.amount !== "");
+    if (filledEmployees.some(e => !e.employeeId || !Number.isFinite(Number(e.amount)) || Number(e.amount) <= 0)) return setErr("حدد الموظف ومبلغًا صحيحًا أكبر من صفر لكل سجل راتب");
+    if (filledEmployees.some(e => e.kind === "deduction" && e.reason === "أخرى" && !e.notes.trim())) return setErr("اكتب تفاصيل سبب الخصم الآخر");
+    const validEmployees = filledEmployees.map(e => ({ ...e, payrollMonth: e.payrollMonth || date.slice(0,7) }));
     const hasAny = validSales.length > 0 || validExpenses.length > 0 || validSuppliers.length > 0 || validEmployees.length > 0 || Number(networkToday) > 0 || (cashToday !== "" && cashToday != null);
     if (!hasAny) return setErr("عبّي خانة وحدة على الأقل");
     onSave({
@@ -2016,7 +2026,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
 
       {data.employees.length > 0 && (
         <div className="bg-blue-50 rounded-xl p-3 mb-3">
-          <div className="text-xs font-semibold text-blue-700 mb-2">🧑‍🔧 دفعات رواتب لأكثر من موظف (اختياري)</div>
+          <div className="text-xs font-semibold text-blue-700 mb-2">🧑‍🔧 دفعات رواتب وخصومات — تفاصيل اليومية (اختياري)</div>
           <div className="space-y-2">
             {employeePayments.map((ep, idx) => (
               <div key={idx} className="bg-white rounded-lg p-2 space-y-1">
@@ -2025,13 +2035,20 @@ function QuickDailyModal({ data, onClose, onSave }) {
                     <option value="">اختر موظف</option>
                     {data.employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
                   </select>
-                  <input type="number" value={ep.amount} onChange={e => updateEmployee(idx, { amount: e.target.value })} placeholder="المبلغ" className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
+                  <input type="number" value={ep.amount} onChange={e => updateEmployee(idx, { amount: e.target.value })} placeholder={ep.kind === "deduction" ? "مبلغ الخصم" : "المبلغ المدفوع فعليًا"} className="flex-1 min-w-0 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
                   {employeePayments.length > 1 && <button onClick={() => removeEmployeeRow(idx)} className="text-red-400 px-1">✕</button>}
                 </div>
+                <select aria-label="نوع حركة الراتب" value={ep.kind} onChange={e => updateEmployee(idx, { kind: e.target.value })} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs"><option value="payment">دفعة راتب — صرف فعلي</option><option value="deduction">خصم من المستحق — بدون صرف</option></select>
+                {ep.kind === "deduction" && <div className="space-y-1">
+                  <select aria-label="سبب خصم اليومية" value={ep.reason} onChange={e => updateEmployee(idx, { reason: e.target.value })} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs">{["تأخير", "عجز / نقص بالحساب", "غياب", "أخرى"].map(r => <option key={r}>{r}</option>)}</select>
+                  <label className="block text-xs text-slate-500">الخصم على راتب شهر<input aria-label="شهر خصم اليومية" type="month" value={ep.payrollMonth || date.slice(0,7)} onChange={e => updateEmployee(idx, { payrollMonth: e.target.value })} className="w-full bg-slate-50 rounded-lg py-2 px-2" /></label>
+                  <p className="text-[11px] text-slate-500">يخفض مستحق الراتب ويظهر في سجل الموظف؛ لا يخصم من الكاش مرة أخرى.</p>
+                </div>}
+                <input aria-label="تفاصيل حركة الراتب" value={ep.notes} onChange={e => updateEmployee(idx, { notes: e.target.value })} placeholder={ep.kind === "deduction" ? "التفاصيل: مثل تأخر ساعة أو عجز صندوق" : "تفاصيل الدفعة (اختياري)"} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs" />
               </div>
             ))}
           </div>
-          <button onClick={addEmployeeRow} className="text-xs text-blue-700 mt-2">＋ إضافة موظف آخر</button>
+          <button onClick={addEmployeeRow} className="text-xs text-blue-700 mt-2">＋ إضافة دفعة أو خصم آخر</button>
         </div>
       )}
 
@@ -3466,7 +3483,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
 
                 {remaining < 0 && <div className="text-xs text-amber-700 mb-3">هذا المبلغ قد يكون تكملة لراتب سابق. افتح سجل الدفعات واضغط «توزيع الدفعة» لتحديد الأشهر؛ لا يُعتبر زيادة مستلمة تلقائيًا.</div>}
                 <button onClick={() => setPayFor(emp)} className="w-full bg-slate-800 text-white rounded-xl py-2 text-xs font-semibold mb-2">＋ تسجيل دفعة من الراتب</button>
-                <button onClick={() => setExpanded(open ? null : emp.id)} className="text-[11px] text-slate-400">{open ? "إخفاء سجل الدفعات ▲" : "عرض سجل الدفعات ▼"}</button>
+                <button onClick={() => setExpanded(open ? null : emp.id)} className="text-[11px] text-slate-400">{open ? "إخفاء سجل دفعات الرواتب والخصومات ▲" : "عرض سجل دفعات الرواتب والخصومات ▼"}</button>
                 {open && <label className="flex gap-2 text-xs mt-2"><input type="checkbox" checked={allPayments} onChange={e => setAllPayments(e.target.checked)} />عرض كل الدفعات وتوزيعها على الرواتب</label>}
                 {open && (
                   <div className="mt-2 divide-y divide-slate-100 bg-slate-50 rounded-xl">
