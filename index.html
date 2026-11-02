@@ -215,8 +215,7 @@ function escapeReportHtml(value) {
 function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
   const emp = data.employees.find(e => e.id === employeeId);
   if (!emp) return false;
-  const entries = (emp.entries || [])
-    .filter(e => !reportMonth || payrollEntryMonth(e) === reportMonth)
+  const entries = (reportMonth ? payrollSummary(emp, reportMonth).entries : (emp.entries || []))
     .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const total = entries.filter(e => e.kind !== "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const deductions = entries.filter(e => e.kind === "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
@@ -240,7 +239,7 @@ function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
     <div class="summary">
       ${reportMonth ? `<div>صافي الراتب<strong>${fmt(salary)} ${currency}</strong></div>` : ""}
       <div>إجمالي السحوبات<strong>${fmt(total)} ${currency}</strong></div><div>الخصومات<strong>${fmt(deductions)} ${currency}</strong></div>
-      ${reportMonth ? `<div>${salary - total >= 0 ? "الباقي من الراتب" : "زيادة على الراتب"}<strong>${fmt(Math.abs(salary - total))} ${currency}</strong></div>` : ""}
+      ${reportMonth ? `<div>${salary - total >= 0 ? "الباقي من الراتب" : "مبلغ يحتاج توزيع"}<strong>${fmt(Math.abs(salary - total))} ${currency}</strong></div>` : ""}
     </div>
     <table><thead><tr><th>#</th><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead>
       <tbody>${rows || `<tr><td colspan="4">لا توجد سحوبات في هذه الفترة</td></tr>`}</tbody>
@@ -1256,7 +1255,7 @@ function App() {
       linkedSafeEntryId = uid();
       safeLog = [{ id: linkedSafeEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
     }
-    const newEntry = { id: uid(), kind: "payment", payrollMonth: entry.payrollMonth || payrollMonth(entry.date), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
+    const newEntry = { id: uid(), kind: "payment", allocations: entry.allocations, payrollMonth: entry.payrollMonth || payrollMonth(entry.date), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
     persist({
       ...data, transactions: [tx, ...data.transactions], networkLog, cashLog, safeLog,
       employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: [newEntry, ...e.entries] } : e),
@@ -3229,17 +3228,60 @@ function payrollMonth(date) {
   return start.toISOString().slice(0, 7);
 }
 function payrollEntryMonth(entry) { return entry.payrollMonth || payrollMonth(entry.date); }
+function payrollAllocations(entry) {
+  return entry.allocations?.length ? entry.allocations : [{ month: payrollEntryMonth(entry), amount: Number(entry.amount || 0) }];
+}
+function payrollMonths(emp) {
+  return [...new Set((emp.entries || []).flatMap(e => payrollAllocations(e).map(a => a.month)))].filter(Boolean).sort();
+}
 function payrollSummary(emp, month) {
-  const entries = (emp.entries || []).filter(e => payrollEntryMonth(e) === month);
+  const entries = (emp.entries || []).flatMap(e => {
+    const amount = payrollAllocations(e).filter(a => a.month === month).reduce((n,a) => n + Number(a.amount), 0);
+    return amount > 0 ? [{ ...e, originalAmount: e.amount, amount }] : [];
+  });
   const paid = entries.filter(e => e.kind !== "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
   const deductions = entries.filter(e => e.kind === "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
   const salary = Number(emp.monthlySalary || 0);
-  return { entries, paid, deductions, salary, net: Math.max(0, salary - deductions), remaining: Math.max(0, salary - deductions) - paid };
+  return { entries, paid, deductions, salary, net: Math.max(0, salary - deductions), remaining: Math.round((Math.max(0, salary - deductions) - paid) * 100) / 100 };
+}
+function validPayrollAllocations(rows, amount) {
+  return rows.length > 0 && rows.every(a => /^\d{4}-(0[1-9]|1[0-2])$/.test(a.month) && Number.isFinite(Number(a.amount)) && Number(a.amount) > 0 && Math.abs(Number(a.amount) * 100 - Math.round(Number(a.amount) * 100)) < 0.00001)
+    && Math.round(Number(amount) * 100) === rows.reduce((n,a) => n + Math.round(Number(a.amount) * 100), 0);
+}
+function oldestUnfinishedPayroll(emp, fallback) {
+  return payrollMonths(emp).find(m => m <= fallback && payrollSummary(emp, m).remaining > 0) || fallback;
+}
+function PayrollAllocationFields({ rows, onChange }) {
+  return <div className="space-y-2 mb-3">
+    {rows.map((row, i) => <div key={i} className="flex gap-2 items-center">
+      <input aria-label={`شهر الراتب ${i + 1}`} type="month" value={row.month} onChange={e => onChange(rows.map((r,j) => j === i ? { ...r, month: e.target.value } : r))} className="min-w-0 flex-1 bg-slate-50 rounded-xl p-2 text-xs" />
+      <input aria-label={`مبلغ التوزيع ${i + 1}`} type="number" min="0.01" step="0.01" value={row.amount} onChange={e => onChange(rows.map((r,j) => j === i ? { ...r, amount: e.target.value } : r))} className="min-w-0 w-24 bg-slate-50 rounded-xl p-2 text-xs num" />
+      {rows.length > 1 && <button type="button" aria-label="حذف جزء التوزيع" onClick={() => onChange(rows.filter((_,j) => j !== i))} className="text-red-500">×</button>}
+    </div>)}
+    <button type="button" onClick={() => onChange([...rows, { month: "", amount: "" }])} className="text-xs text-blue-600">＋ توزيع جزء على راتب شهر آخر</button>
+  </div>;
+}
+function PayrollAllocationModal({ entry, employee, onClose, onSave }) {
+  const [rows, setRows] = useState(() => payrollAllocations(entry).map(a => ({ ...a })));
+  const [err, setErr] = useState("");
+  function save() {
+    if (!validPayrollAllocations(rows, entry.amount)) return setErr("اختر الشهر لكل جزء؛ مجموع التوزيع يجب أن يساوي مبلغ الدفعة بالكامل وبحد أقصى منزلتين عشريتين");
+    onSave(rows.map(a => ({ month: a.month, amount: Number(a.amount) })));
+  }
+  return <Sheet title={`توزيع راتب — ${employee.name}`} onClose={onClose}>
+    <p className="text-sm mb-3">دفعة بتاريخ {entry.date} · إجمالي {fmt(entry.amount)}. حدد هي راتب أي شهر، أو قسمها لتكملة راتب سابق والباقي للشهر التالي.</p>
+    <PayrollAllocationFields rows={rows} onChange={setRows} />
+    <div className="text-xs mb-3">الموزع: {fmt(rows.reduce((n,a) => n + Number(a.amount || 0), 0))} / {fmt(entry.amount)}</div>
+    {err && <p role="alert" className="text-red-500 text-xs mb-2">{err}</p>}
+    <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm">حفظ توزيع الدفعة</button>
+  </Sheet>;
 }
 
 function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onToggleToday, onMarkAttendance, onDeleteAttendance }) {
   const [form, setForm] = useState(null);
   const [payFor, setPayFor] = useState(null);
+  const [allocateFor, setAllocateFor] = useState(null);
+  const [allPayments, setAllPayments] = useState(false);
   const [attendFor, setAttendFor] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [expandedAttendance, setExpandedAttendance] = useState(null);
@@ -3249,7 +3291,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
   const today = todayISO();
   const monthOptions = [...new Set([
     curMonth, selectedMonth,
-    ...data.employees.flatMap(emp => [payrollMonth(emp.createdAt), ...(emp.entries || []).map(payrollEntryMonth)]),
+    ...data.employees.flatMap(payrollMonths),
   ])].filter(m => /^\d{4}-\d{2}$/.test(m)).sort().reverse();
   const selectedMonthLabel = `${AR_MONTHS[Number(selectedMonth.slice(5, 7)) - 1]} ${selectedMonth.slice(0, 4)}`;
 
@@ -3272,8 +3314,8 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         <button onClick={() => setForm({ name: "", phone: "", monthlySalary: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة موظف</button>
       </div>
 
-      <div className="text-xs text-slate-500">دورة الراتب من يوم 5 إلى يوم 4 من الشهر التالي. الدفعات القديمة موزعة حسب تاريخها؛ يمكن تصحيح دورتها من السجل.</div>
-      <input aria-label="اختيار دورة الراتب" type="month" value={selectedMonth} onChange={e => { if (e.target.value) setSelectedMonth(e.target.value); }} className="bg-white rounded-xl p-2" />
+      <div className="text-xs text-slate-500">أنت تحدد كل دفعة تخص راتب أي شهر، حتى لو دفعتها في شهر مختلف. من «توزيع الدفعة» تقدر تكمل راتب سابق وتقسم الباقي على راتب جديد. راجع توزيع الدفعات القديمة لأنها كانت محسوبة بالتاريخ.</div>
+      <input aria-label="اختيار شهر الراتب" type="month" value={selectedMonth} onChange={e => { if (e.target.value) setSelectedMonth(e.target.value); }} className="bg-white rounded-xl p-2" />
       {data.employees.length > 0 && (
         <select aria-label="عرض رواتب شهر" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none">
           {monthOptions.map(m => <option key={m} value={m}>{AR_MONTHS[Number(m.slice(5, 7)) - 1]} {m.slice(0, 4)}</option>)}
@@ -3296,6 +3338,8 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         <div className="space-y-3">
           {data.employees.map(emp => {
             const { paid, deductions, salary, net, remaining, entries } = payrollSummary(emp, selectedMonth);
+            const priorMonths = payrollMonths(emp).filter(m => m < selectedMonth);
+            const priorRemaining = priorMonths.reduce((n,m) => n + Math.max(0, payrollSummary(emp,m).remaining), 0);
             const paidAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount || 0), 0);
             const pct = net > 0 ? Math.min(100, Math.round((paid / net) * 100)) : 100;
             const open = expanded === emp.id;
@@ -3317,16 +3361,20 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                   </div>
                 </div>
 
+                <details className="bg-blue-50 rounded-xl p-3 text-xs mb-3">
+                  <summary className="cursor-pointer">متبقي الرواتب السابقة: {fmt(priorRemaining)} {data.settings.currency} · عرض الأشهر</summary>
+                  {priorMonths.length === 0 ? <p className="mt-2">لا توجد أشهر سابقة مسجلة؛ اختر شهرًا سابقًا لتسجيل دفعاته.</p> : priorMonths.map(m => <button key={m} onClick={() => setSelectedMonth(m)} className="block mt-2 underline">راتب {m}: {payrollSummary(emp,m).remaining > 0 ? `باقي ${fmt(payrollSummary(emp,m).remaining)}` : payrollSummary(emp,m).remaining === 0 ? "مكتمل" : `مبلغ غير موزع ${fmt(-payrollSummary(emp,m).remaining)}`}</button>)}
+                </details>
                 <div className="text-xs text-slate-500 mb-1.5">
-                  استلم <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} في {selectedMonthLabel}
+                  المخصص لراتب هذا الشهر <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} في {selectedMonthLabel}
                 </div>
-                <div className="text-xs mb-2">خصومات: {fmt(deductions)} · الصافي: {fmt(net)} {data.settings.currency} · {remaining <= 0 ? "✓ مكتمل" : "غير مكتمل"}</div>
+                <div className="text-xs mb-2">خصومات: {fmt(deductions)} · الصافي: {fmt(net)} {data.settings.currency} · {remaining < 0 ? "يحتاج توزيع" : remaining === 0 ? "✓ مكتمل" : "غير مكتمل"}</div>
                 <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
                   <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#0f9d6e" : "#3B82F6" }} />
                 </div>
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mb-3">
                   <span>{pct}%</span>
-                  <span className={remaining < 0 ? "text-red-500 font-semibold" : ""}>{remaining >= 0 ? `باقي له ${fmt(remaining)} ${data.settings.currency}` : `أخذ زيادة ${fmt(-remaining)} ${data.settings.currency}`}</span>
+                  <span className={remaining < 0 ? "text-red-500 font-semibold" : ""}>{remaining >= 0 ? `باقي له ${fmt(remaining)} ${data.settings.currency}` : `مبلغ يحتاج توزيع على الرواتب: ${fmt(-remaining)} ${data.settings.currency}`}</span>
                 </div>
                 <div className="text-[11px] text-slate-400 mb-3">إجمالي ما استلمه منذ البداية: <span className="font-semibold num text-slate-700">{fmt(paidAllTime)} {data.settings.currency}</span></div>
 
@@ -3358,21 +3406,24 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                   )}
                 </div>
 
+                {remaining < 0 && <div className="text-xs text-amber-700 mb-3">هذا المبلغ قد يكون تكملة لراتب سابق. افتح سجل الدفعات واضغط «توزيع الدفعة» لتحديد الأشهر؛ لا يُعتبر زيادة مستلمة تلقائيًا.</div>}
                 <button onClick={() => setPayFor(emp)} className="w-full bg-slate-800 text-white rounded-xl py-2 text-xs font-semibold mb-2">＋ تسجيل دفعة من الراتب</button>
                 <button onClick={() => setExpanded(open ? null : emp.id)} className="text-[11px] text-slate-400">{open ? "إخفاء سجل الدفعات ▲" : "عرض سجل الدفعات ▼"}</button>
+                {open && <label className="flex gap-2 text-xs mt-2"><input type="checkbox" checked={allPayments} onChange={e => setAllPayments(e.target.checked)} />عرض كل الدفعات لترتيب الرواتب القديمة</label>}
                 {open && (
                   <div className="mt-2 divide-y divide-slate-100 bg-slate-50 rounded-xl">
-                    {entries.length === 0 ? (
+                    {(allPayments ? (emp.entries || []) : entries).length === 0 ? (
                       <div className="text-center text-slate-400 text-xs py-4">لا توجد دفعات مسجلة بعد</div>
-                    ) : entries.map(e => (
+                    ) : (allPayments ? (emp.entries || []) : entries).map(e => (
                       <div key={e.id} className="flex items-center justify-between px-3 py-2">
                         <div>
                           <div className="text-xs font-medium">{e.kind === "deduction" ? "خصم · " : "دفعة · "}{e.date}{e.notes ? " · " + e.notes : ""}</div>
-                          <input aria-label="تصحيح دورة السجل" type="month" value={payrollEntryMonth(e)} onChange={event => { if (event.target.value) onSave({ id: emp.id, entries: emp.entries.map(x => x.id === e.id ? { ...x, payrollMonth: event.target.value } : x) }); }} className="text-xs bg-white rounded p-1 mt-1" />
+                          <div className="text-[11px] text-slate-500 mt-1">{payrollAllocations(emp.entries.find(x => x.id === e.id)).map((a,i) => <span key={i} className="block">راتب {a.month}: {fmt(a.amount)}</span>)}</div>
+                          <button onClick={() => setAllocateFor({ employee: emp, entry: emp.entries.find(x => x.id === e.id) })} className="text-xs text-blue-600 underline mt-1">توزيع الدفعة على الرواتب</button>
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold num text-slate-700">{fmt(e.amount)}</span>
-                          <button onClick={() => onDeletePayment(emp.id, e.id)} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
+                          <span className="text-xs font-bold num text-slate-700">{fmt(e.amount)}{!allPayments && e.originalAmount !== e.amount ? <span className="block text-[10px] text-slate-400">من إجمالي {fmt(e.originalAmount)}</span> : null}</span>
+                          <button title="حذف الدفعة كاملة بجميع توزيعاتها" onClick={() => { if (window.confirm("حذف الدفعة كاملة وجميع توزيعاتها وعكس أثرها المالي؟")) onDeletePayment(emp.id, e.id); }} className="text-slate-300 hover:text-red-500 text-xs">🗑</button>
                         </div>
                       </div>
                     ))}
@@ -3384,9 +3435,14 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         </div>
       )}
 
+      {allocateFor && <PayrollAllocationModal employee={allocateFor.employee} entry={allocateFor.entry} onClose={() => setAllocateFor(null)} onSave={allocations => {
+        const employee = data.employees.find(e => e.id === allocateFor.employee.id);
+        onSave({ id: employee.id, entries: employee.entries.map(e => e.id === allocateFor.entry.id ? { ...e, allocations, payrollMonth: allocations[0].month } : e) });
+        setAllocateFor(null);
+      }} />}
       {form && <EmployeeModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
       {payFor && (
-        <EmployeePaymentModal payrollPeriod={selectedMonth} employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
+        <EmployeePaymentModal payrollPeriod={oldestUnfinishedPayroll(payFor, selectedMonth)} employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
       )}
       {attendFor && (
         <AttendanceModal employee={attendFor} onClose={() => setAttendFor(null)} onSave={(payload) => { onMarkAttendance(attendFor.id, payload); setAttendFor(null); }} />
@@ -3448,7 +3504,9 @@ function EmployeeModal({ initial, onClose, onSave }) {
 
 function EmployeePaymentModal({ employee, currency, payrollPeriod, onClose, onSave }) {
   const [kind, setKind] = useState("payment");
-  const [period, setPeriod] = useState(payrollPeriod || payrollMonth(todayISO()));
+  const [period, setPeriod] = useState(payrollPeriod || "");
+  const [split, setSplit] = useState(false);
+  const [rows, setRows] = useState([]);
   const [reason, setReason] = useState("عجز");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
@@ -3461,15 +3519,20 @@ function EmployeePaymentModal({ employee, currency, payrollPeriod, onClose, onSa
     if (!date) return setErr("التاريخ مطلوب");
     if (!/^\d{4}-\d{2}$/.test(period)) return setErr("اختر دورة الراتب");
     if (kind === "deduction" && reason === "أخرى" && !notes.trim()) return setErr("اكتب سبب الخصم");
-    onSave({ amount: v, date, kind, payrollMonth: period, notes: kind === "deduction" ? `${reason}${notes.trim() ? " · " + notes.trim() : ""}` : notes.trim(), paymentSource });
+    const allocations = split ? rows : [{ month: period, amount: v }];
+    if (!validPayrollAllocations(allocations, v)) return setErr("مجموع التوزيع يجب أن يساوي المبلغ بالكامل؛ حدد الشهر والمبلغ لكل جزء");
+    onSave({ amount: v, date, kind, allocations: allocations.map(a => ({ month: a.month, amount: Number(a.amount) })), payrollMonth: period, notes: kind === "deduction" ? `${reason}${notes.trim() ? " · " + notes.trim() : ""}` : notes.trim(), paymentSource });
   }
   return (
     <Sheet onClose={onClose} title={`دفعة راتب — ${employee.name}`}>
       <Field label="نوع السجل"><select value={kind} onChange={e => setKind(e.target.value)}><option value="payment">دفعة راتب</option><option value="deduction">خصم يدوي من المستحق</option></select></Field>
-      <Field label="دورة الراتب (تبدأ يوم 5)"><input type="month" value={period} onChange={e => setPeriod(e.target.value)} /></Field>
+      <p className="text-xs text-slate-500 mb-2">الشهر المقترح هو أقدم راتب مسجل غير مكتمل. اختر الشهر الذي تخصه الدفعة؛ تاريخ الدفع لا يغيره.</p>
+      <Field label="هذه الدفعة تخص راتب شهر"><input type="month" value={period} onChange={e => setPeriod(e.target.value)} /></Field>
       {kind === "deduction" && <Field label="سبب الخصم"><select value={reason} onChange={e => setReason(e.target.value)}>{["عجز", "غياب", "تأخير", "أخرى"].map(r => <option key={r}>{r}</option>)}</select><p className="text-xs text-slate-500">يقلل صافي الراتب فقط؛ لا يخصم من الكاش ولا يسجل مصروفًا إضافيًا.</p></Field>}
       <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
-      <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <label className="flex gap-2 text-xs mb-3"><input type="checkbox" checked={split} onChange={e => { setSplit(e.target.checked); if (e.target.checked && !rows.length) setRows([{ month: period, amount }]); }} />تقسيم المبلغ على أكثر من راتب</label>
+      {split && <PayrollAllocationFields rows={rows} onChange={setRows} />}
+      <Field label="تاريخ الدفع الفعلي"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="ملاحظات (اختياري)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
       <div className="mb-2" hidden={kind === "deduction"}>
         <div className="text-[11px] text-slate-400 mb-1">الدفع من</div>
