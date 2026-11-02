@@ -151,9 +151,10 @@ function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, in
 
   let totalSalaryRemaining = 0;
   const employeeRowsHtml = data.employees.map(emp => {
-    const takenThisMonth = (emp.entries || []).filter(e => e.date.slice(0, 7) === curMonth).reduce((s, e) => s + e.amount, 0);
-    const takenAllTime = (emp.entries || []).reduce((s, e) => s + e.amount, 0);
-    const remaining = Number(emp.monthlySalary || 0) - takenThisMonth;
+    const cycle = payrollSummary(emp, payrollMonth(todayISO()));
+    const takenThisMonth = cycle.paid;
+    const takenAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount), 0);
+    const remaining = cycle.remaining;
     totalSalaryRemaining += Math.max(0, remaining);
     return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${emp.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${emp.phone || "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(emp.monthlySalary)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(takenThisMonth)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(takenAllTime)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(remaining)}</td></tr>`;
   }).join("");
@@ -215,12 +216,13 @@ function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
   const emp = data.employees.find(e => e.id === employeeId);
   if (!emp) return false;
   const entries = (emp.entries || [])
-    .filter(e => !reportMonth || (e.date || "").slice(0, 7) === reportMonth)
+    .filter(e => !reportMonth || payrollEntryMonth(e) === reportMonth)
     .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-  const total = entries.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-  const salary = Number(emp.monthlySalary || 0);
+  const total = entries.filter(e => e.kind !== "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const deductions = entries.filter(e => e.kind === "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const salary = Math.max(0, Number(emp.monthlySalary || 0) - deductions);
   const currency = escapeReportHtml(data.settings.currency);
-  const rows = entries.map((e, i) => `<tr><td>${i + 1}</td><td>${escapeReportHtml(e.date)}</td><td>${escapeReportHtml(e.notes || "—")}</td><td>${fmt(e.amount)} ${currency}</td></tr>`).join("");
+  const rows = entries.map((e, i) => `<tr><td>${i + 1}</td><td>${escapeReportHtml(e.date)}</td><td>${e.kind === "deduction" ? "خصم: " : "دفعة: "}${escapeReportHtml(e.notes || "—")}</td><td>${fmt(e.amount)} ${currency}</td></tr>`).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
     <title>تقرير سحوبات ${escapeReportHtml(emp.name)} ${reportMonth || "كل الفترات"}</title>
     <style>
@@ -236,8 +238,8 @@ function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
     <h1>تقرير سحوبات الموظف: ${escapeReportHtml(emp.name)}</h1>
     <div class="sub">${escapeReportHtml(data.settings.shopName)} · ${reportMonth ? "شهر " + escapeReportHtml(reportMonth) : "جميع الفترات"} · تاريخ الإصدار ${todayISO()}</div>
     <div class="summary">
-      ${reportMonth ? `<div>الراتب الشهري<strong>${fmt(salary)} ${currency}</strong></div>` : ""}
-      <div>إجمالي السحوبات<strong>${fmt(total)} ${currency}</strong></div>
+      ${reportMonth ? `<div>صافي الراتب<strong>${fmt(salary)} ${currency}</strong></div>` : ""}
+      <div>إجمالي السحوبات<strong>${fmt(total)} ${currency}</strong></div><div>الخصومات<strong>${fmt(deductions)} ${currency}</strong></div>
       ${reportMonth ? `<div>${salary - total >= 0 ? "الباقي من الراتب" : "زيادة على الراتب"}<strong>${fmt(Math.abs(salary - total))} ${currency}</strong></div>` : ""}
     </div>
     <table><thead><tr><th>#</th><th>التاريخ</th><th>البيان</th><th>المبلغ</th></tr></thead>
@@ -1226,6 +1228,13 @@ function App() {
   function addEmployeePayment(employeeId, entry) {
     const emp = data.employees.find(e => e.id === employeeId);
     if (!emp) return;
+    if (entry.kind === "deduction") {
+      if (!Number.isFinite(Number(entry.amount)) || Number(entry.amount) <= 0) return;
+      const item = { ...entry, id: uid(), paymentSource: "none", createdAt: new Date().toISOString() };
+      persist({ ...data, employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: [item, ...(e.entries || [])] } : e) });
+      showToast("تم تسجيل الخصم من مستحق الراتب");
+      return;
+    }
     const txId = uid();
     const tx = {
       id: txId, type: "expense", title: `دفعة راتب - ${emp.name}`, category: "رواتب",
@@ -1247,7 +1256,7 @@ function App() {
       linkedSafeEntryId = uid();
       safeLog = [{ id: linkedSafeEntryId, date: entry.date, type: "deduct", amount: Number(entry.amount), notes: `راتب: ${emp.name}`, kind: "employee", linkedTxId: txId, createdAt: new Date().toISOString() }, ...safeLog];
     }
-    const newEntry = { id: uid(), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
+    const newEntry = { id: uid(), kind: "payment", payrollMonth: entry.payrollMonth || payrollMonth(entry.date), amount: Number(entry.amount), date: entry.date, notes: entry.notes || "", linkedTxId: txId, linkedNetworkEntryId, linkedCashEntryId, linkedSafeEntryId, createdAt: new Date().toISOString() };
     persist({
       ...data, transactions: [tx, ...data.transactions], networkLog, cashLog, safeLog,
       employees: data.employees.map(e => e.id === employeeId ? { ...e, entries: [newEntry, ...e.entries] } : e),
@@ -1419,10 +1428,12 @@ function App() {
 
   return (
     <div dir="rtl" className="min-h-[700px] bg-[#F6F7F9] text-slate-800 flex flex-col max-w-[480px] mx-auto relative">
+      <details open={tab !== "ledger"} key={tab === "ledger" ? "compact" : "full"}><summary className="cursor-pointer px-4 py-2 text-xs text-slate-500">الأرصدة — اضغط للعرض / الإخفاء</summary>
       <TopBar shopName={data.settings.shopName} balance={cashTotal + networkTotal + safeTotal} currency={data.settings.currency}
         cashTotal={cashTotal} onOpenCashLog={() => setCashLogOpen(true)}
         networkTotal={networkTotal} onOpenNetworkLog={() => setNetworkLogOpen(true)}
         safeTotal={safeTotal} onOpenSafeLog={() => setSafeLogOpen(true)} />
+      </details>
 
       <div className="flex-1 overflow-y-auto pb-24 px-4 pt-4">
         {tab === "dashboard" && (
@@ -2123,7 +2134,7 @@ function Ledger({ data, onEdit, onDelete, onExport }) {
         {filtered.length === 0 ? (
           <div className="text-center text-slate-400 text-sm py-8">لا توجد نتائج مطابقة</div>
         ) : (
-          <div className="divide-y divide-slate-100">
+          <div className="divide-y divide-slate-100 max-h-[55vh] overflow-y-auto overscroll-contain">
             {filtered.map(t => <TxRow key={t.id} t={t} onClick={() => onEdit(t)} onEdit={onEdit} onDelete={onDelete} />)}
           </div>
         )}
@@ -3210,6 +3221,22 @@ function InvoiceModal({ data, onClose, onSave }) {
   );
 }
 
+// Payroll cycles run from the 5th through the 4th; explicit assignment supports late payments.
+function payrollMonth(date) {
+  if (!date) return "";
+  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
+  const start = new Date(Date.UTC(y, m - 1 - (d < 5 ? 1 : 0), 5));
+  return start.toISOString().slice(0, 7);
+}
+function payrollEntryMonth(entry) { return entry.payrollMonth || payrollMonth(entry.date); }
+function payrollSummary(emp, month) {
+  const entries = (emp.entries || []).filter(e => payrollEntryMonth(e) === month);
+  const paid = entries.filter(e => e.kind !== "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
+  const deductions = entries.filter(e => e.kind === "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
+  const salary = Number(emp.monthlySalary || 0);
+  return { entries, paid, deductions, salary, net: Math.max(0, salary - deductions), remaining: Math.max(0, salary - deductions) - paid };
+}
+
 function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onToggleToday, onMarkAttendance, onDeleteAttendance }) {
   const [form, setForm] = useState(null);
   const [payFor, setPayFor] = useState(null);
@@ -3221,13 +3248,13 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
   const [selectedMonth, setSelectedMonth] = useState(curMonth);
   const today = todayISO();
   const monthOptions = [...new Set([
-    curMonth,
-    ...data.employees.flatMap(emp => [emp.createdAt?.slice(0, 7), ...(emp.entries || []).map(e => e.date?.slice(0, 7))]),
+    curMonth, selectedMonth,
+    ...data.employees.flatMap(emp => [payrollMonth(emp.createdAt), ...(emp.entries || []).map(payrollEntryMonth)]),
   ])].filter(m => /^\d{4}-\d{2}$/.test(m)).sort().reverse();
   const selectedMonthLabel = `${AR_MONTHS[Number(selectedMonth.slice(5, 7)) - 1]} ${selectedMonth.slice(0, 4)}`;
 
   function paidInSelectedMonth(emp) {
-    return (emp.entries || []).filter(e => e.date?.slice(0, 7) === selectedMonth).reduce((s, e) => s + Number(e.amount || 0), 0);
+    return payrollSummary(emp, selectedMonth).paid;
   }
   function attendanceThisMonth(emp) {
     return (emp.attendance || []).filter(a => a.date.slice(0, 7) === curMonth && a.status === "present").length;
@@ -3236,7 +3263,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
     return (emp.attendance || []).filter(a => a.date.slice(0, 7) === curMonth && a.status === "absent").length;
   }
 
-  const totalRemaining = data.employees.reduce((s, e) => s + Math.max(0, Number(e.monthlySalary || 0) - paidInSelectedMonth(e)), 0);
+  const totalRemaining = data.employees.reduce((s, e) => s + Math.max(0, payrollSummary(e, selectedMonth).remaining), 0);
 
   return (
     <div className="space-y-4">
@@ -3245,6 +3272,8 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         <button onClick={() => setForm({ name: "", phone: "", monthlySalary: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة موظف</button>
       </div>
 
+      <div className="text-xs text-slate-500">دورة الراتب من يوم 5 إلى يوم 4 من الشهر التالي. الدفعات القديمة موزعة حسب تاريخها؛ يمكن تصحيح دورتها من السجل.</div>
+      <input aria-label="اختيار دورة الراتب" type="month" value={selectedMonth} onChange={e => { if (e.target.value) setSelectedMonth(e.target.value); }} className="bg-white rounded-xl p-2" />
       {data.employees.length > 0 && (
         <select aria-label="عرض رواتب شهر" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none">
           {monthOptions.map(m => <option key={m} value={m}>{AR_MONTHS[Number(m.slice(5, 7)) - 1]} {m.slice(0, 4)}</option>)}
@@ -3266,11 +3295,9 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
       ) : (
         <div className="space-y-3">
           {data.employees.map(emp => {
-            const paid = paidInSelectedMonth(emp);
-            const paidAllTime = (emp.entries || []).reduce((s, e) => s + Number(e.amount || 0), 0);
-            const salary = Number(emp.monthlySalary || 0);
-            const remaining = salary - paid;
-            const pct = salary > 0 ? Math.min(100, Math.round((paid / salary) * 100)) : 0;
+            const { paid, deductions, salary, net, remaining, entries } = payrollSummary(emp, selectedMonth);
+            const paidAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount || 0), 0);
+            const pct = net > 0 ? Math.min(100, Math.round((paid / net) * 100)) : 100;
             const open = expanded === emp.id;
             const attOpen = expandedAttendance === emp.id;
             const presentDays = attendanceThisMonth(emp);
@@ -3293,6 +3320,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                 <div className="text-xs text-slate-500 mb-1.5">
                   استلم <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} في {selectedMonthLabel}
                 </div>
+                <div className="text-xs mb-2">خصومات: {fmt(deductions)} · الصافي: {fmt(net)} {data.settings.currency} · {remaining <= 0 ? "✓ مكتمل" : "غير مكتمل"}</div>
                 <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
                   <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#0f9d6e" : "#3B82F6" }} />
                 </div>
@@ -3334,12 +3362,13 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                 <button onClick={() => setExpanded(open ? null : emp.id)} className="text-[11px] text-slate-400">{open ? "إخفاء سجل الدفعات ▲" : "عرض سجل الدفعات ▼"}</button>
                 {open && (
                   <div className="mt-2 divide-y divide-slate-100 bg-slate-50 rounded-xl">
-                    {emp.entries.length === 0 ? (
+                    {entries.length === 0 ? (
                       <div className="text-center text-slate-400 text-xs py-4">لا توجد دفعات مسجلة بعد</div>
-                    ) : emp.entries.map(e => (
+                    ) : entries.map(e => (
                       <div key={e.id} className="flex items-center justify-between px-3 py-2">
                         <div>
-                          <div className="text-xs font-medium">{e.date}{e.notes ? " · " + e.notes : ""}</div>
+                          <div className="text-xs font-medium">{e.kind === "deduction" ? "خصم · " : "دفعة · "}{e.date}{e.notes ? " · " + e.notes : ""}</div>
+                          <input aria-label="تصحيح دورة السجل" type="month" value={payrollEntryMonth(e)} onChange={event => { if (event.target.value) onSave({ id: emp.id, entries: emp.entries.map(x => x.id === e.id ? { ...x, payrollMonth: event.target.value } : x) }); }} className="text-xs bg-white rounded p-1 mt-1" />
                         </div>
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-bold num text-slate-700">{fmt(e.amount)}</span>
@@ -3357,7 +3386,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
 
       {form && <EmployeeModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
       {payFor && (
-        <EmployeePaymentModal employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
+        <EmployeePaymentModal payrollPeriod={selectedMonth} employee={payFor} currency={data.settings.currency} onClose={() => setPayFor(null)} onSave={(entry) => { onAddPayment(payFor.id, entry); setPayFor(null); }} />
       )}
       {attendFor && (
         <AttendanceModal employee={attendFor} onClose={() => setAttendFor(null)} onSave={(payload) => { onMarkAttendance(attendFor.id, payload); setAttendFor(null); }} />
@@ -3417,7 +3446,10 @@ function EmployeeModal({ initial, onClose, onSave }) {
   );
 }
 
-function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
+function EmployeePaymentModal({ employee, currency, payrollPeriod, onClose, onSave }) {
+  const [kind, setKind] = useState("payment");
+  const [period, setPeriod] = useState(payrollPeriod || payrollMonth(todayISO()));
+  const [reason, setReason] = useState("عجز");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayISO());
   const [notes, setNotes] = useState("");
@@ -3425,16 +3457,21 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
   const [err, setErr] = useState("");
   function save() {
     const v = Number(amount);
-    if (!v || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
+    if (!Number.isFinite(v) || v <= 0) return setErr("المبلغ يجب أن يكون أكبر من صفر");
     if (!date) return setErr("التاريخ مطلوب");
-    onSave({ amount: v, date, notes: notes.trim(), paymentSource });
+    if (!/^\d{4}-\d{2}$/.test(period)) return setErr("اختر دورة الراتب");
+    if (kind === "deduction" && reason === "أخرى" && !notes.trim()) return setErr("اكتب سبب الخصم");
+    onSave({ amount: v, date, kind, payrollMonth: period, notes: kind === "deduction" ? `${reason}${notes.trim() ? " · " + notes.trim() : ""}` : notes.trim(), paymentSource });
   }
   return (
     <Sheet onClose={onClose} title={`دفعة راتب — ${employee.name}`}>
+      <Field label="نوع السجل"><select value={kind} onChange={e => setKind(e.target.value)}><option value="payment">دفعة راتب</option><option value="deduction">خصم يدوي من المستحق</option></select></Field>
+      <Field label="دورة الراتب (تبدأ يوم 5)"><input type="month" value={period} onChange={e => setPeriod(e.target.value)} /></Field>
+      {kind === "deduction" && <Field label="سبب الخصم"><select value={reason} onChange={e => setReason(e.target.value)}>{["عجز", "غياب", "تأخير", "أخرى"].map(r => <option key={r}>{r}</option>)}</select><p className="text-xs text-slate-500">يقلل صافي الراتب فقط؛ لا يخصم من الكاش ولا يسجل مصروفًا إضافيًا.</p></Field>}
       <Field label={`المبلغ (${currency})`}><input type="number" value={amount} onChange={e => setAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
       <Field label="التاريخ"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="ملاحظات (اختياري)"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
-      <div className="mb-2">
+      <div className="mb-2" hidden={kind === "deduction"}>
         <div className="text-[11px] text-slate-400 mb-1">الدفع من</div>
         <div className="grid grid-cols-2 gap-2">
           <button type="button" onClick={() => setPaymentSource("none")} className={`text-xs py-2 rounded-xl border font-medium ${paymentSource === "none" ? "bg-slate-800 text-white border-slate-800" : "border-slate-200 text-slate-600"}`}>بدون ربط</button>
@@ -3444,7 +3481,7 @@ function EmployeePaymentModal({ employee, currency, onClose, onSave }) {
         </div>
       </div>
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
-      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ الدفعة</button>
+      <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ السجل</button>
     </Sheet>
   );
 }
