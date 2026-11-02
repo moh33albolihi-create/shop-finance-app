@@ -151,7 +151,7 @@ function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, in
 
   let totalSalaryRemaining = 0;
   const employeeRowsHtml = data.employees.map(emp => {
-    const cycle = payrollSummary(emp, payrollMonth(todayISO()));
+    const cycle = payrollSummary(emp, todayISO().slice(0,7));
     const takenThisMonth = cycle.paid;
     const takenAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount), 0);
     const remaining = cycle.remaining;
@@ -219,7 +219,7 @@ function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
     .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const total = entries.filter(e => e.kind !== "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const deductions = entries.filter(e => e.kind === "deduction").reduce((sum, e) => sum + Number(e.amount || 0), 0);
-  const salary = Math.max(0, Number(emp.monthlySalary || 0) - deductions);
+  const salary = Math.max(0, (reportMonth ? payrollSalary(emp, reportMonth) : Number(emp.monthlySalary || 0)) - deductions);
   const currency = escapeReportHtml(data.settings.currency);
   const rows = entries.map((e, i) => `<tr><td>${i + 1}</td><td>${escapeReportHtml(e.date)}</td><td>${e.kind === "deduction" ? "خصم: " : "دفعة: "}${escapeReportHtml(e.notes || "—")}</td><td>${fmt(e.amount)} ${currency}</td></tr>`).join("");
   const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
@@ -235,7 +235,7 @@ function buildAndPrintEmployeeReport(data, employeeId, reportMonth) {
       @media print{body{padding:12px}thead{display:table-header-group}tr{break-inside:avoid}}
     </style></head><body>
     <h1>تقرير سحوبات الموظف: ${escapeReportHtml(emp.name)}</h1>
-    <div class="sub">${escapeReportHtml(data.settings.shopName)} · ${reportMonth ? "شهر " + escapeReportHtml(reportMonth) : "جميع الفترات"} · تاريخ الإصدار ${todayISO()}</div>
+    <div class="sub">تاريخ المباشرة: ${escapeReportHtml(emp.startDate || "غير محدد")} · ${escapeReportHtml(data.settings.shopName)} · ${reportMonth ? "شهر " + escapeReportHtml(reportMonth) : "جميع الفترات"} · تاريخ الإصدار ${todayISO()}</div>
     <div class="summary">
       ${reportMonth ? `<div>صافي الراتب<strong>${fmt(salary)} ${currency}</strong></div>` : ""}
       <div>إجمالي السحوبات<strong>${fmt(total)} ${currency}</strong></div><div>الخصومات<strong>${fmt(deductions)} ${currency}</strong></div>
@@ -3231,8 +3231,34 @@ function payrollEntryMonth(entry) { return entry.payrollMonth || payrollMonth(en
 function payrollAllocations(entry) {
   return entry.allocations?.length ? entry.allocations : [{ month: payrollEntryMonth(entry), amount: Number(entry.amount || 0) }];
 }
+function validEmploymentDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
+  const date = new Date(value + "T00:00:00Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
+}
+function payrollSalary(emp, month) {
+  const monthly = Number(emp.monthlySalary || 0);
+  if (!validEmploymentDate(emp.startDate)) return monthly;
+  const firstMonth = emp.startDate.slice(0,7);
+  if (month < firstMonth) return 0;
+  if (month !== firstMonth) return monthly;
+  if (emp.firstSalaryMode === "manual" && Number.isFinite(Number(emp.firstSalaryAmount)) && emp.firstSalaryAmount !== "" && emp.firstSalaryAmount != null) return Math.max(0, Number(emp.firstSalaryAmount));
+  const [year, m, day] = emp.startDate.split("-").map(Number);
+  const days = new Date(Date.UTC(year, m, 0)).getUTCDate();
+  return Math.round(monthly * (days - day + 1) / days * 100) / 100;
+}
 function payrollMonths(emp) {
-  return [...new Set((emp.entries || []).flatMap(e => payrollAllocations(e).map(a => a.month)))].filter(Boolean).sort();
+  const months = (emp.entries || []).flatMap(e => payrollAllocations(e).map(a => a.month));
+  if (validEmploymentDate(emp.startDate)) {
+    const current = todayISO().slice(0,7);
+    let [year, month] = emp.startDate.slice(0,7).split("-").map(Number);
+    for (let key = `${year}-${String(month).padStart(2,"0")}`; key <= current; key = `${year}-${String(month).padStart(2,"0")}`) {
+      months.push(key);
+      if (++month > 12) { month = 1; year++; }
+    }
+    months.push(emp.startDate.slice(0,7));
+  }
+  return [...new Set(months)].filter(Boolean).sort();
 }
 function payrollSummary(emp, month) {
   const entries = (emp.entries || []).flatMap(e => {
@@ -3241,7 +3267,7 @@ function payrollSummary(emp, month) {
   });
   const paid = entries.filter(e => e.kind !== "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
   const deductions = entries.filter(e => e.kind === "deduction").reduce((n,e) => n + Number(e.amount || 0), 0);
-  const salary = Number(emp.monthlySalary || 0);
+  const salary = payrollSalary(emp, month);
   return { entries, paid, deductions, salary, net: Math.max(0, salary - deductions), remaining: Math.round((Math.max(0, salary - deductions) - paid) * 100) / 100 };
 }
 function validPayrollAllocations(rows, amount) {
@@ -3338,7 +3364,8 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         <div className="space-y-3">
           {data.employees.map(emp => {
             const { paid, deductions, salary, net, remaining, entries } = payrollSummary(emp, selectedMonth);
-            const priorMonths = payrollMonths(emp).filter(m => m < selectedMonth);
+            const beforeStart = validEmploymentDate(emp.startDate) && selectedMonth < emp.startDate.slice(0,7);
+            const priorMonths = payrollMonths(emp).filter(m => m < selectedMonth && (!validEmploymentDate(emp.startDate) || m >= emp.startDate.slice(0,7)));
             const priorRemaining = priorMonths.reduce((n,m) => n + Math.max(0, payrollSummary(emp,m).remaining), 0);
             const paidAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount || 0), 0);
             const pct = net > 0 ? Math.min(100, Math.round((paid / net) * 100)) : 100;
@@ -3361,6 +3388,9 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                   </div>
                 </div>
 
+                <div className="text-xs mb-3 text-slate-500">{emp.startDate ? `بداية الدوام: ${emp.startDate}` : "تاريخ بداية الدوام غير محدد — حدده من تعديل الموظف لحساب الاستحقاق من مباشرته"}</div>
+                {beforeStart && <div className="text-xs text-amber-700 mb-3">هذا الشهر قبل مباشرة الموظف؛ المستحق صفر. أي دفعات ظاهرة تبقى محفوظة ويمكن إعادة توزيعها.</div>}
+                {emp.startDate?.slice(0,7) === selectedMonth && <div className="text-xs text-blue-700 mb-3">أول راتب: {emp.firstSalaryMode === "manual" ? "المبلغ المحدد يدويًا" : "من يوم المباشرة إلى نهاية الشهر، شامل يوم المباشرة وبحسب عدد أيام الشهر"} · {fmt(salary)} {data.settings.currency}</div>}
                 <details className="bg-blue-50 rounded-xl p-3 text-xs mb-3">
                   <summary className="cursor-pointer">متبقي الرواتب السابقة: {fmt(priorRemaining)} {data.settings.currency} · عرض الأشهر</summary>
                   {priorMonths.length === 0 ? <p className="mt-2">لا توجد أشهر سابقة مسجلة؛ اختر شهرًا سابقًا لتسجيل دفعاته.</p> : priorMonths.map(m => <button key={m} onClick={() => setSelectedMonth(m)} className="block mt-2 underline">راتب {m}: {payrollSummary(emp,m).remaining > 0 ? `باقي ${fmt(payrollSummary(emp,m).remaining)}` : payrollSummary(emp,m).remaining === 0 ? "مكتمل" : `مبلغ غير موزع ${fmt(-payrollSummary(emp,m).remaining)}`}</button>)}
@@ -3368,7 +3398,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
                 <div className="text-xs text-slate-500 mb-1.5">
                   المخصص لراتب هذا الشهر <span className="font-bold num text-slate-800">{fmt(paid)}</span> من راتب <span className="font-bold num text-slate-800">{fmt(salary)}</span> {data.settings.currency} في {selectedMonthLabel}
                 </div>
-                <div className="text-xs mb-2">خصومات: {fmt(deductions)} · الصافي: {fmt(net)} {data.settings.currency} · {remaining < 0 ? "يحتاج توزيع" : remaining === 0 ? "✓ مكتمل" : "غير مكتمل"}</div>
+                <div className="text-xs mb-2">خصومات: {fmt(deductions)} · الصافي: {fmt(net)} {data.settings.currency} · {beforeStart ? "قبل المباشرة" : remaining < 0 ? "يحتاج توزيع" : remaining === 0 ? "✓ مكتمل" : "غير مكتمل"}</div>
                 <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1.5">
                   <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining <= 0 ? "#0f9d6e" : "#3B82F6" }} />
                 </div>
@@ -3484,17 +3514,27 @@ function EmployeeModal({ initial, onClose, onSave }) {
   const [name, setName] = useState(initial.name || "");
   const [phone, setPhone] = useState(initial.phone || "");
   const [monthlySalary, setMonthlySalary] = useState(initial.monthlySalary ?? "");
+  const [startDate, setStartDate] = useState(initial.startDate || "");
+  const [firstSalaryMode, setFirstSalaryMode] = useState(initial.firstSalaryMode || "prorated");
+  const [firstSalaryAmount, setFirstSalaryAmount] = useState(initial.firstSalaryAmount ?? "");
   const [notes, setNotes] = useState(initial.notes || "");
   const [err, setErr] = useState("");
   function save() {
     if (!name.trim()) return setErr("اسم الموظف مطلوب");
-    onSave({ id: initial.id, name: name.trim(), phone: phone.trim(), monthlySalary: Number(monthlySalary || 0), notes: notes.trim() });
+    if (!validEmploymentDate(startDate)) return setErr("حدد تاريخ بداية الدوام الصحيح");
+    if (!Number.isFinite(Number(monthlySalary)) || Number(monthlySalary) < 0) return setErr("الراتب يجب أن يكون صفرًا أو أكثر");
+    if (firstSalaryMode === "manual" && (firstSalaryAmount === "" || !Number.isFinite(Number(firstSalaryAmount)) || Number(firstSalaryAmount) < 0)) return setErr("أدخل مبلغ أول راتب الصحيح");
+    onSave({ startDate, firstSalaryMode, firstSalaryAmount: firstSalaryMode === "manual" ? Number(firstSalaryAmount) : null, id: initial.id, name: name.trim(), phone: phone.trim(), monthlySalary: Number(monthlySalary || 0), notes: notes.trim() });
   }
   return (
     <Sheet onClose={onClose} title={initial.id ? "تعديل موظف" : "إضافة موظف"}>
       <Field label="اسم الموظف"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="رقم الجوال (اختياري)"><input value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="الراتب الشهري"><input type="number" value={monthlySalary} onChange={e => setMonthlySalary(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
+      <Field label="تاريخ بداية الدوام / المباشرة"><input aria-label="تاريخ بداية الدوام" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm" /></Field>
+      <Field label="حساب أول راتب"><select aria-label="حساب أول راتب" value={firstSalaryMode} onChange={e => setFirstSalaryMode(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm"><option value="prorated">حسب الأيام من المباشرة إلى نهاية الشهر</option><option value="manual">أحدد مبلغ أول راتب يدويًا</option></select></Field>
+      {firstSalaryMode === "manual" && <Field label="مبلغ أول راتب"><input aria-label="مبلغ أول راتب" type="number" min="0" step="0.01" value={firstSalaryAmount} onChange={e => setFirstSalaryAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm" /></Field>}
+      {validEmploymentDate(startDate) && <p className="text-xs text-blue-700 mb-3">مستحق أول شهر: {fmt(payrollSalary({ monthlySalary, startDate, firstSalaryMode, firstSalaryAmount }, startDate.slice(0,7)))}. {firstSalaryMode === "prorated" ? "الحساب يشمل يوم المباشرة ويقسم الراتب على عدد أيام ذلك الشهر." : "بحسب المبلغ الذي تحدده."} الأشهر التالية بالراتب الكامل، ولا يستحق راتبًا قبل مباشرته.</p>}
       <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
       <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
