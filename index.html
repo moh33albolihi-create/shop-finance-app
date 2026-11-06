@@ -3253,17 +3253,21 @@ function validEmploymentDate(value) {
   const date = new Date(value + "T00:00:00Z");
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
 }
+// A salary month is earned only on its completion anniversary.
+function payrollDueDate(emp, month) {
+  if (!validEmploymentDate(emp.startDate) || month < emp.startDate.slice(0,7)) return "";
+  const [year, m] = month.split("-").map(Number);
+  const day = Number(emp.startDate.slice(8,10));
+  const last = new Date(Date.UTC(year, m + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, m, Math.min(day,last))).toISOString().slice(0,10);
+}
+function payrollIsDue(emp, month) {
+  const dueDate = payrollDueDate(emp,month);
+  return dueDate ? dueDate <= todayISO() : !validEmploymentDate(emp.startDate) && month < todayISO().slice(0,7);
+}
 function payrollSalary(emp, month) {
-  const monthly = Number(emp.monthlySalary || 0);
-  if (!validEmploymentDate(emp.startDate)) return monthly;
-  const firstMonth = emp.startDate.slice(0,7);
-  if (emp.startDate > todayISO() && month <= todayISO().slice(0,7)) return 0;
-  if (month < firstMonth) return 0;
-  if (month !== firstMonth) return monthly;
-  if (emp.firstSalaryMode === "manual" && Number.isFinite(Number(emp.firstSalaryAmount)) && emp.firstSalaryAmount !== "" && emp.firstSalaryAmount != null) return Math.max(0, Number(emp.firstSalaryAmount));
-  const [year, m, day] = emp.startDate.split("-").map(Number);
-  const days = new Date(Date.UTC(year, m, 0)).getUTCDate();
-  return Math.round(monthly * (days - day + 1) / days * 100) / 100;
+  if (validEmploymentDate(emp.startDate) && month < emp.startDate.slice(0,7)) return 0;
+  return Number(emp.monthlySalary || 0);
 }
 function payrollMonths(emp) {
   const months = (emp.entries || []).flatMap(e => payrollAllocations(e).map(a => a.month));
@@ -3315,7 +3319,7 @@ function payrollSummary(emp, month) {
 }
 function employeePayrollOverview(emp) {
   const knownStart = validEmploymentDate(emp.startDate);
-  const months = payrollMonths(emp).filter(m => m < todayISO().slice(0,7) && (!knownStart || m >= emp.startDate.slice(0,7)));
+  const months = payrollMonths(emp).filter(m => payrollIsDue(emp,m) && (!knownStart || m >= emp.startDate.slice(0,7)));
   const round = n => Math.round(n * 100) / 100;
   let gross = 0, deductions = 0;
   for (const month of months) {
@@ -3398,7 +3402,7 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
         <button onClick={() => setForm({ name: "", phone: "", monthlySalary: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة موظف</button>
       </div>
 
-      <div className="text-xs text-slate-500">بعد تحديد تاريخ المباشرة، توزع جميع الدفعات تلقائيًا على أقدم راتب غير مكتمل: يكمل الشهر الأول ثم ينتقل للذي بعده. الخصومات تخص الشهر المحدد لها، الراتب يصبح مستحقًا بعد انتهاء شهره. أي دفعة تتجاوز الرواتب المستحقة تظهر مقدمًا للموظف نفسه، ولا يضاف راتب الشهر الجاري إلى الباقي له.</div>
+      <div className="text-xs text-slate-500">بعد تحديد تاريخ المباشرة، توزع جميع الدفعات تلقائيًا على أقدم راتب غير مكتمل: يكمل الشهر الأول ثم ينتقل للذي بعده. الخصومات تخص الشهر المحدد لها، الراتب ينضاف كاملًا فقط عند إكمال شهر من تاريخ المباشرة، ثم كل شهر في نفس اليوم. الشهور التي يبدأ دوامها يوم 29 أو 30 أو 31 تستحق في آخر يوم من الشهر الأقصر عند الحاجة. أي دفعة تتجاوز الرواتب المستحقة تظهر مقدمًا للموظف نفسه، ولا يضاف الشهر الذي لم يكتمل إلى الباقي له.</div>
       <input aria-label="اختيار شهر الراتب" type="month" value={selectedMonth} onChange={e => { if (e.target.value) setSelectedMonth(e.target.value); }} className="bg-white rounded-xl p-2" />
       {data.employees.length > 0 && (
         <select aria-label="عرض رواتب شهر" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none">
@@ -3425,9 +3429,9 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
             const overview = employeePayrollOverview(emp);
             const effectiveEntries = automaticPayrollEntries(emp);
             const advance = overview.knownStart ? overview.advance : effectiveEntries.reduce((n,e) => n + Number(e.advance || 0), 0);
-            const notDue = selectedMonth >= todayISO().slice(0,7);
+            const notDue = !payrollIsDue(emp, selectedMonth);
             const beforeStart = validEmploymentDate(emp.startDate) && selectedMonth < emp.startDate.slice(0,7);
-            const priorMonths = payrollMonths(emp).filter(m => m < selectedMonth && m < todayISO().slice(0,7) && (!validEmploymentDate(emp.startDate) || m >= emp.startDate.slice(0,7)));
+            const priorMonths = payrollMonths(emp).filter(m => m < selectedMonth && payrollIsDue(emp,m) && (!validEmploymentDate(emp.startDate) || m >= emp.startDate.slice(0,7)));
             const priorRemaining = priorMonths.reduce((n,m) => n + Math.max(0, payrollSummary(emp,m).remaining), 0);
             const paidAllTime = (emp.entries || []).filter(e => e.kind !== "deduction").reduce((s, e) => s + Number(e.amount || 0), 0);
             const pct = net > 0 ? Math.min(100, Math.round((paid / net) * 100)) : 100;
@@ -3452,18 +3456,18 @@ function Employees({ data, onSave, onDelete, onAddPayment, onDeletePayment, onTo
 
                 <div className="text-xs mb-3 text-slate-500">{emp.startDate ? `بداية الدوام: ${emp.startDate}` : "تاريخ بداية الدوام غير محدد — حدده من تعديل الموظف لحساب الاستحقاق من مباشرته"}</div>
                 {overview.knownStart ? <div className="bg-slate-800 text-white rounded-xl p-4 mb-3">
-                  <div className="text-xs mb-3">حساب الرواتب المستحقة حتى نهاية الشهر الماضي</div>
+                  <div className="text-xs mb-3">حساب الرواتب عن أشهر العمل المكتملة</div>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div>إجمالي المستحق قبل الخصم<strong className="block num mt-1">{fmt(overview.gross)} {data.settings.currency}</strong></div>
                     <div>إجمالي المستلم<strong className="block num mt-1">{fmt(overview.paid)} {data.settings.currency}</strong></div>
                     <div>الخصومات المحتسبة<strong className="block num mt-1">{fmt(overview.deductions)} {data.settings.currency}</strong></div>
                     <div>{overview.balance < 0 ? "مدفوع مقدمًا" : "الباقي له"}<strong className="block num mt-1 text-lg">{fmt(Math.abs(overview.balance))} {data.settings.currency}</strong></div>
                   </div>
-                  <div className="text-[11px] mt-3 opacity-80">المستحق − الخصومات − المستلم = الباقي. راتب الشهر الجاري غير داخل في المستحق، والمقدم خاص بهذا الموظف.</div>
+                  <div className="text-[11px] mt-3 opacity-80">المستحق − الخصومات − المستلم = الباقي. الشهر غير المكتمل لا يدخل في المستحق. المقدم خاص بهذا الموظف.</div>
                 </div> : <div className="text-xs text-amber-700 mb-3">أكمل تاريخ المباشرة لعرض الإجمالي الصحيح؛ هذا الموظف غير مشمول بإجمالي المتبقي أعلى الصفحة.</div>}
                 <details className="mb-3"><summary className="cursor-pointer text-xs font-semibold mb-3">تفاصيل راتب {selectedMonthLabel} وتوزيع الدفعات</summary>
                 {beforeStart && <div className="text-xs text-amber-700 mb-3">هذا الشهر قبل مباشرة الموظف؛ المستحق صفر. أي دفعات ظاهرة تبقى محفوظة ويمكن إعادة توزيعها.</div>}
-                {emp.startDate?.slice(0,7) === selectedMonth && <div className="text-xs text-blue-700 mb-3">أول راتب: {emp.firstSalaryMode === "manual" ? "المبلغ المحدد يدويًا" : "من يوم المباشرة إلى نهاية الشهر، شامل يوم المباشرة وبحسب عدد أيام الشهر"} · {fmt(salary)} {data.settings.currency}</div>}
+                {payrollDueDate(emp,selectedMonth) && <div className="text-xs text-blue-700 mb-3">راتب شهر العمل الذي يبدأ في {selectedMonth}: {fmt(salary)} {data.settings.currency} · يستحق كاملًا بتاريخ {payrollDueDate(emp,selectedMonth)}</div>}
                 {advance > 0 && <div className="text-xs text-blue-700 mb-3">رصيد مدفوع مقدمًا للرواتب القادمة: {fmt(advance)} {data.settings.currency}</div>}
                 <details className="bg-blue-50 rounded-xl p-3 text-xs mb-3">
                   <summary className="cursor-pointer">متبقي الرواتب السابقة: {fmt(priorRemaining)} {data.settings.currency} · عرض الأشهر</summary>
@@ -3592,16 +3596,13 @@ function EmployeeModal({ initial, onClose, onSave }) {
   const [phone, setPhone] = useState(initial.phone || "");
   const [monthlySalary, setMonthlySalary] = useState(initial.monthlySalary ?? "");
   const [startDate, setStartDate] = useState(initial.startDate || "");
-  const [firstSalaryMode, setFirstSalaryMode] = useState(initial.firstSalaryMode || "prorated");
-  const [firstSalaryAmount, setFirstSalaryAmount] = useState(initial.firstSalaryAmount ?? "");
   const [notes, setNotes] = useState(initial.notes || "");
   const [err, setErr] = useState("");
   function save() {
     if (!name.trim()) return setErr("اسم الموظف مطلوب");
     if (!validEmploymentDate(startDate)) return setErr("حدد تاريخ بداية الدوام الصحيح");
     if (!Number.isFinite(Number(monthlySalary)) || Number(monthlySalary) < 0) return setErr("الراتب يجب أن يكون صفرًا أو أكثر");
-    if (firstSalaryMode === "manual" && (firstSalaryAmount === "" || !Number.isFinite(Number(firstSalaryAmount)) || Number(firstSalaryAmount) < 0)) return setErr("أدخل مبلغ أول راتب الصحيح");
-    onSave({ startDate, firstSalaryMode, firstSalaryAmount: firstSalaryMode === "manual" ? Number(firstSalaryAmount) : null, id: initial.id, name: name.trim(), phone: phone.trim(), monthlySalary: Number(monthlySalary || 0), notes: notes.trim() });
+    onSave({ startDate, firstSalaryMode: "monthly", firstSalaryAmount: null, id: initial.id, name: name.trim(), phone: phone.trim(), monthlySalary: Number(monthlySalary || 0), notes: notes.trim() });
   }
   return (
     <Sheet onClose={onClose} title={initial.id ? "تعديل موظف" : "إضافة موظف"}>
@@ -3609,9 +3610,7 @@ function EmployeeModal({ initial, onClose, onSave }) {
       <Field label="رقم الجوال (اختياري)"><input value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="الراتب الشهري"><input type="number" value={monthlySalary} onChange={e => setMonthlySalary(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none num" /></Field>
       <Field label="تاريخ بداية الدوام / المباشرة"><input aria-label="تاريخ بداية الدوام" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm" /></Field>
-      <Field label="حساب أول راتب"><select aria-label="حساب أول راتب" value={firstSalaryMode} onChange={e => setFirstSalaryMode(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm"><option value="prorated">حسب الأيام من المباشرة إلى نهاية الشهر</option><option value="manual">أحدد مبلغ أول راتب يدويًا</option></select></Field>
-      {firstSalaryMode === "manual" && <Field label="مبلغ أول راتب"><input aria-label="مبلغ أول راتب" type="number" min="0" step="0.01" value={firstSalaryAmount} onChange={e => setFirstSalaryAmount(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm" /></Field>}
-      {validEmploymentDate(startDate) && <p className="text-xs text-blue-700 mb-3">مستحق أول شهر: {fmt(payrollSalary({ monthlySalary, startDate, firstSalaryMode, firstSalaryAmount }, startDate.slice(0,7)))}. {firstSalaryMode === "prorated" ? "الحساب يشمل يوم المباشرة ويقسم الراتب على عدد أيام ذلك الشهر." : "بحسب المبلغ الذي تحدده."} الأشهر التالية بالراتب الكامل، ولا يستحق راتبًا قبل مباشرته.</p>}
+      {validEmploymentDate(startDate) && <p className="text-xs text-blue-700 mb-3">أول راتب كامل: {fmt(Number(monthlySalary || 0))}، يستحق بتاريخ {payrollDueDate({ startDate },startDate.slice(0,7))}. قبل إكمال الشهر يكون المستحق صفرًا؛ بعده ينضاف الراتب كاملًا كل شهر، والدفعات تخصم تلقائيًا.</p>}
       <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
       <button onClick={save} className="w-full bg-slate-800 text-white rounded-xl py-3 text-sm font-semibold">حفظ</button>
