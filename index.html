@@ -2826,12 +2826,16 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
   const [category, setCategory] = useState(() =>
     BUSINESS_CATEGORIES.find(({ id }) => data.suppliers.some(s => supplierCategory(s).id === id))?.id || BUSINESS_CATEGORIES[0].id
   );
-  const visibleSuppliers = data.suppliers.filter(s => supplierCategory(s).id === category);
-
-  const totalDebt = data.suppliers.reduce((sum, s) => {
-    const bal = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
-    return sum + Math.max(0, bal);
-  }, 0);
+  const debtByCategory = Object.fromEntries(BUSINESS_CATEGORIES.map(({ id }) => [id, 0]));
+  const supplierBalances = data.suppliers.map(supplier => {
+    const categoryId = supplierCategory(supplier).id;
+    const balance = supplier.entries.reduce((sum, entry) =>
+      sum + (entry.type === "debt" ? Number(entry.amount) : -Number(entry.amount)), 0);
+    debtByCategory[categoryId] += Math.max(0, balance);
+    return { supplier, categoryId, balance };
+  });
+  const visibleSuppliers = supplierBalances.filter(({ categoryId }) => categoryId === category);
+  const totalDebt = Object.values(debtByCategory).reduce((sum, debt) => sum + debt, 0);
 
   return (
     <div className="space-y-4">
@@ -2854,7 +2858,10 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
         {BUSINESS_CATEGORIES.map(({ id, label }) => (
           <button key={id} type="button" aria-pressed={category === id} onClick={() => setCategory(id)}
             className={`rounded-xl px-2 py-2.5 text-xs font-semibold ${category === id ? "bg-slate-800 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
-            {label}
+            <span className="block">{label}</span>
+            <span className={`mt-1 block num ${category === id ? "text-slate-200" : debtByCategory[id] > 0 ? "text-red-600" : "text-slate-500"}`}>
+              {fmt(debtByCategory[id])} {data.settings.currency}
+            </span>
           </button>
         ))}
       </div>
@@ -2863,8 +2870,7 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
         <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد مناديب أو موردون في هذا التصنيف</div>
       ) : (
         <div className="space-y-3">
-          {visibleSuppliers.map(s => {
-            const balance = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
+          {visibleSuppliers.map(({ supplier: s, balance }) => {
             const open = expanded === s.id;
             return (
               <div key={s.id} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
