@@ -69,8 +69,9 @@ function supplierCategory(supplier) {
 }
 
 function transactionCategory(category) {
-  if (category === "صيانة") return "maintenance";
-  if (["بضاعة المحل", "إكسسوارات", "بيع قطعة", "بيع جهاز", "شراء أجهزة"].includes(category)) return "merchandise";
+  const name = (category || "").trim().replace(/\s+/g, " ").replace(/[أإآ]/g, "ا").replace(/ة/g, "ه");
+  if (name === "صيانه") return "maintenance";
+  if (["بضاعه المحل", "مبيعات بضاعه المحل", "اكسسوارات", "بيع قطعه", "بيع جهاز", "شراء اجهزه"].includes(name)) return "merchandise";
   return "other";
 }
 
@@ -118,7 +119,8 @@ function isSupplierSettlement(t) { return t.type === "expense" && t.category ===
 // Profit follows the date of the purchase/debt. Paying a supplier only moves money.
 function profitMovements(data, categories = supplierMovementCategories(data)) {
   const movements = data.transactions.filter(t => !isSupplierSettlement(t)).map(t => ({
-    ...t, businessCategory: t.businessCategory || categories.transactions.get(t.id) || transactionCategory(t.category),
+    ...t, businessCategory: (t.type === "income" ? undefined : t.businessCategory)
+      || categories.transactions.get(t.id) || transactionCategory(t.category),
   }));
   const invoiceDebtIds = new Set();
   const invoiceReturnIds = new Set();
@@ -973,7 +975,7 @@ function App() {
     (payload.sales || []).forEach(s => {
       if (!(Number(s.amount) > 0)) return;
       transactions = [{
-        id: uid(), type: "income", title: s.category ? `مبيعات ${s.category} - ${payload.date}` : `مبيعات يوم ${payload.date}`, category: s.category || "", businessCategory: s.businessCategory || undefined,
+        id: uid(), type: "income", title: s.category ? `مبيعات ${s.category} - ${payload.date}` : `مبيعات يوم ${payload.date}`, category: s.category || "",
         amount: Number(s.amount), date: payload.date, notes: s.notes || "", createdAt: new Date().toISOString(),
       }, ...transactions];
     });
@@ -2122,8 +2124,6 @@ function QuickDailyModal({ data, onClose, onSave }) {
                 </select>
                 {sales.length > 1 && <button onClick={() => removeSaleRow(idx)} className="text-red-400 px-1">✕</button>}
               </div>
-              <BusinessCategorySelect value={s.businessCategory || ""} onChange={value => updateSale(idx, { businessCategory: value })}
-                fallback={transactionCategory(s.category)} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none" />
               <input value={s.notes} onChange={e => updateSale(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
             </div>
           ))}
@@ -3987,7 +3987,7 @@ function TxModal({ type, setType, categories, initial, linkedCategory, currency,
       onSave({ id: initial?.id, type, person: person.trim(), partnerId: partnerId || null, amount: amt, date, notes: reason.trim() });
     } else {
       if (!title.trim()) return setErr("اسم العملية مطلوب");
-      onSave({ id: initial?.id, type, title: title.trim(), category, businessCategory: activity || undefined, amount: amt, date, notes: notes.trim(), paymentSource: type === "expense" ? paymentSource : "none" });
+      onSave({ id: initial?.id, type, title: title.trim(), category, businessCategory: type === "expense" ? activity || undefined : undefined, amount: amt, date, notes: notes.trim(), paymentSource: type === "expense" ? paymentSource : "none" });
     }
   }
 
@@ -4027,11 +4027,13 @@ function TxModal({ type, setType, categories, initial, linkedCategory, currency,
               {cats.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
-          <Field label="قسم العملية">
-            <BusinessCategorySelect value={activity} onChange={setActivity}
-              fallback={linkedCategory || transactionCategory(category)}
-              className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
-          </Field>
+          {type === "expense" && (
+            <Field label="قسم العملية">
+              <BusinessCategorySelect value={activity} onChange={setActivity}
+                fallback={linkedCategory || transactionCategory(category)}
+                className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
+            </Field>
+          )}
         </>
       )}
       {type === "expense" && (
