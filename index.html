@@ -38,7 +38,7 @@ const DEFAULT_DATA = {
   transactions: [],
   obligations: [],
   devices: [],
-  suppliers: [], // {id,name,phone,notes,entries:[{id,type:'debt'|'payment',amount,date,notes,linkedTxId,createdAt}],createdAt}
+  suppliers: [], // {id,name,phone,notes,category,entries:[{id,type:'debt'|'payment',amount,date,notes,linkedTxId,createdAt}],createdAt}
   archivedSupplierAdjustments: [],
   closings: [], // {id,date,openingBalance,income,expense,withdraw,net,closingBalance,notes,closedAt}
   inventory: [], // {id,name,category,quantity,unitCost,unitPrice,minQty,notes,createdAt}
@@ -54,25 +54,87 @@ function todayISO() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function monthKey(d) { return d.slice(0, 7); }
+const BUSINESS_CATEGORIES = [
+  { id: "maintenance", label: "صيانة" },
+  { id: "merchandise", label: "بضاعة المحل" },
+  { id: "other", label: "أخرى" },
+];
+
+function businessCategory(id) {
+  return BUSINESS_CATEGORIES.find(category => category.id === id) || BUSINESS_CATEGORIES[2];
+}
+
+function supplierCategory(supplier) {
+  return businessCategory(supplier?.category);
+}
+
+function transactionCategory(category) {
+  if (category === "صيانة") return "maintenance";
+  if (["بضاعة المحل", "إكسسوارات", "بيع قطعة", "بيع جهاز", "شراء أجهزة"].includes(category)) return "merchandise";
+  return "other";
+}
+
+function BusinessCategorySelect({ value, onChange, fallback, className }) {
+  return (
+    <select aria-label="قسم العملية" value={value} onChange={e => onChange(e.target.value)} className={className}>
+      {fallback && <option value="">تلقائي · {businessCategory(fallback).label}</option>}
+      {BUSINESS_CATEGORIES.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+    </select>
+  );
+}
+
+function supplierMovementCategories(data) {
+  const supplierById = new Map(data.suppliers.map(supplier => [supplier.id, supplier]));
+  const transactions = new Map();
+  const invoices = new Map();
+  for (const supplier of data.suppliers) {
+    for (const entry of supplier.entries) {
+      if (entry.linkedTxId) transactions.set(entry.linkedTxId, supplierCategory(supplier).id);
+    }
+  }
+  for (const invoice of data.purchaseInvoices) {
+    const category = invoice.businessCategory || supplierCategory(supplierById.get(invoice.supplierId)).id;
+    invoices.set(invoice.id, category);
+    if (invoice.linkedTxId) transactions.set(invoice.linkedTxId, category);
+    for (const ret of (invoice.returns || [])) {
+      if (ret.linkedTxId) transactions.set(ret.linkedTxId, category);
+    }
+  }
+  return { transactions, invoices };
+}
+
+function SupplierOptions({ suppliers }) {
+  return BUSINESS_CATEGORIES.map(category => {
+    const matches = suppliers.filter(supplier => supplierCategory(supplier).id === category.id);
+    return matches.length > 0 && (
+      <optgroup key={category.id} label={category.label}>
+        {matches.map(supplier => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
+      </optgroup>
+    );
+  });
+}
+
 function isSupplierSettlement(t) { return t.type === "expense" && t.category === "تسديد مناديب" && t.title?.startsWith("تسديد لـ "); }
 // Profit follows the date of the purchase/debt. Paying a supplier only moves money.
-function profitMovements(data) {
-  const movements = data.transactions.filter(t => !isSupplierSettlement(t));
+function profitMovements(data, categories = supplierMovementCategories(data)) {
+  const movements = data.transactions.filter(t => !isSupplierSettlement(t)).map(t => ({
+    ...t, businessCategory: t.businessCategory || categories.transactions.get(t.id) || transactionCategory(t.category),
+  }));
   const invoiceDebtIds = new Set();
   const invoiceReturnIds = new Set();
   for (const inv of (data.purchaseInvoices || [])) {
     if (inv.paymentType !== "credit") continue;
     if (inv.linkedEntryId) invoiceDebtIds.add(inv.linkedEntryId);
-    movements.push({ id: `invoice-${inv.id}`, type: "expense", title: `فاتورة مشتريات #${inv.invoiceNo}`, category: "مشتريات", amount: Number(inv.total || 0), date: inv.date, notes: inv.supplierName || "", nonCash: true });
+    movements.push({ id: `invoice-${inv.id}`, type: "expense", title: `فاتورة مشتريات #${inv.invoiceNo}`, category: "مشتريات", businessCategory: categories.invoices.get(inv.id), amount: Number(inv.total || 0), date: inv.date, notes: inv.supplierName || "", nonCash: true });
     for (const ret of (inv.returns || [])) {
       if (ret.linkedEntryId) invoiceReturnIds.add(ret.linkedEntryId);
-      movements.push({ id: `return-${ret.id}`, type: "expense", title: `مرتجع فاتورة #${inv.invoiceNo}`, category: "مشتريات", amount: -Number(ret.total || 0), date: ret.date, notes: inv.supplierName || "", nonCash: true });
+      movements.push({ id: `return-${ret.id}`, type: "expense", title: `مرتجع فاتورة #${inv.invoiceNo}`, category: "مشتريات", businessCategory: categories.invoices.get(inv.id), amount: -Number(ret.total || 0), date: ret.date, notes: inv.supplierName || "", nonCash: true });
     }
   }
   for (const s of (data.suppliers || [])) {
     for (const e of (s.entries || [])) {
-      if (e.type === "debt" && !invoiceDebtIds.has(e.id)) movements.push({ id: `debt-${e.id}`, type: "expense", title: `دين مندوب: ${s.name}`, category: "مشتريات", amount: Number(e.amount || 0), date: e.date, notes: e.notes || "", nonCash: true });
-      if (e.type === "return" && !invoiceReturnIds.has(e.id)) movements.push({ id: `supplier-return-${e.id}`, type: "expense", title: `مرتجع مندوب: ${s.name}`, category: "مشتريات", amount: -Number(e.amount || 0), date: e.date, notes: e.notes || "", nonCash: true });
+      if (e.type === "debt" && !invoiceDebtIds.has(e.id)) movements.push({ id: `debt-${e.id}`, type: "expense", title: `دين مندوب: ${s.name}`, category: "مشتريات", businessCategory: supplierCategory(s).id, amount: Number(e.amount || 0), date: e.date, notes: e.notes || "", nonCash: true });
+      if (e.type === "return" && !invoiceReturnIds.has(e.id)) movements.push({ id: `supplier-return-${e.id}`, type: "expense", title: `مرتجع مندوب: ${s.name}`, category: "مشتريات", businessCategory: supplierCategory(s).id, amount: -Number(e.amount || 0), date: e.date, notes: e.notes || "", nonCash: true });
     }
   }
   for (const e of (data.archivedSupplierAdjustments || [])) movements.push(e);
@@ -88,6 +150,29 @@ function profitTotals(data, mKey) {
   }
   return { income, expense, withdraw, net: income - expense };
 }
+function monthlyBusinessBreakdown(data, month) {
+  const categories = supplierMovementCategories(data);
+  const groups = BUSINESS_CATEGORIES.map(category => ({
+    ...category, income: 0, expense: 0, paid: 0, movements: [],
+  }));
+  const byId = new Map(groups.map(group => [group.id, group]));
+  for (const movement of profitMovements(data, categories)) {
+    if (monthKey(movement.date) !== month || !["income", "expense"].includes(movement.type)) continue;
+    const group = byId.get(businessCategory(movement.businessCategory).id);
+    group[movement.type] += Number(movement.amount || 0);
+    if (movement.type === "expense" && !movement.nonCash) group.paid += Number(movement.amount || 0);
+    group.movements.push(movement);
+  }
+  for (const tx of data.transactions) {
+    if (!isSupplierSettlement(tx) || monthKey(tx.date) !== month) continue;
+    const group = byId.get(businessCategory(tx.businessCategory || categories.transactions.get(tx.id)).id);
+    const amount = Number(tx.amount || 0);
+    group.paid += amount;
+    group.movements.push({ ...tx, settlement: true });
+  }
+  return groups;
+}
+
 function csvEscape(s) { const str = String(s ?? ""); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; }
 function downloadFile(filename, content, mime = "text/csv;charset=utf-8;") {
   const blob = new Blob(["\uFEFF" + content], { type: mime });
@@ -146,7 +231,7 @@ function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, in
     totalSupplierDebt += remaining;
     totalSupplierPaid += paidTotal;
     totalSupplierReturned += returnedTotal;
-    return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.phone || "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(debtTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(paidTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(returnedTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(remaining)}</td></tr>`;
+    return `<tr><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.name}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${supplierCategory(s).label}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${s.phone || "—"}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(debtTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(paidTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(returnedTotal)}</td><td style="border:1px solid #e2e8f0; padding:6px 8px; font-size:12px;">${fmt(remaining)}</td></tr>`;
   }).join("");
 
   let totalSalaryRemaining = 0;
@@ -192,7 +277,7 @@ function buildAndPrintSummaryReport(data, cashTotal, networkTotal, safeTotal, in
       <div><div class="label">🏦 صافي ربح الشهر</div><div class="value" style="color:#3B82F6;">${fmt(monthNet)} ${currency}</div></div>
       <div><div class="label">↗ سحوبات الشهر</div><div class="value" style="color:#b8860b;">${fmt(monthWithdraw)} ${currency}</div></div>
     </div>
-    ${reportSection("المناديب والموردين", "🚚", ["الاسم", "الجوال", "دين جديد", "مسدد", "رجيع", "الباقي عليك"], supplierRowsHtml, "لا يوجد مناديب أو موردين مسجلين", "إجمالي المستحق للموردين", totalSupplierDebt, "#b8860b")}
+    ${reportSection("المناديب والموردين", "🚚", ["الاسم", "التصنيف", "الجوال", "دين جديد", "مسدد", "رجيع", "الباقي عليك"], supplierRowsHtml, "لا يوجد مناديب أو موردين مسجلين", "إجمالي المستحق للموردين", totalSupplierDebt, "#b8860b")}
     ${reportSection("الموظفين", "🧑‍🔧", ["الاسم", "الجوال", "الراتب الشهري", "المأخوذ هذا الشهر", "المأخوذ كل الوقت", "الباقي له هذا الشهر"], employeeRowsHtml, "لا يوجد موظفين مسجلين", "إجمالي الرواتب المتبقية", totalSalaryRemaining, "#3B82F6")}
     ${includePartners ? reportSection("السحوبات (الشركاء)", "💸", ["الاسم", "النسبة", "إجمالي المسحوب"], partnerRowsHtml, "لا يوجد شركاء مسجلين أو سحوبات", "إجمالي السحوبات", totalWithdrawn, "#d64545") : ""}
   </body></html>`;
@@ -888,7 +973,7 @@ function App() {
     (payload.sales || []).forEach(s => {
       if (!(Number(s.amount) > 0)) return;
       transactions = [{
-        id: uid(), type: "income", title: s.category ? `مبيعات ${s.category} - ${payload.date}` : `مبيعات يوم ${payload.date}`, category: s.category || "",
+        id: uid(), type: "income", title: s.category ? `مبيعات ${s.category} - ${payload.date}` : `مبيعات يوم ${payload.date}`, category: s.category || "", businessCategory: s.businessCategory || undefined,
         amount: Number(s.amount), date: payload.date, notes: s.notes || "", createdAt: new Date().toISOString(),
       }, ...transactions];
     });
@@ -899,7 +984,7 @@ function App() {
       const linkedCashEntryId = uid();
       cashLog = [{ id: linkedCashEntryId, date: payload.date, type: "deduct", amount: Number(exp.amount), notes: `مصروف: ${exp.title || "مصروف يومي"}`, kind: "expense", linkedTxId: txId, createdAt: new Date().toISOString() }, ...cashLog];
       transactions = [{
-        id: txId, type: "expense", title: exp.title || `مصروف يوم ${payload.date}`, category: exp.category || "",
+        id: txId, type: "expense", title: exp.title || `مصروف يوم ${payload.date}`, category: exp.category || "", businessCategory: exp.businessCategory || undefined,
         amount: Number(exp.amount), date: payload.date, notes: exp.notes || "",
         linkedCashEntryId, createdAt: new Date().toISOString(),
       }, ...transactions];
@@ -1101,6 +1186,7 @@ function App() {
 
     const invoice = {
       id: uid(), invoiceNo: (data.purchaseInvoices.length + 1), supplierId: payload.supplierId || null, supplierName: payload.supplierName || "",
+      businessCategory: payload.businessCategory || undefined,
       date: payload.date, items: payload.items.map(it => ({ name: it.name.trim(), qty: Number(it.qty), unitCost: Number(it.unitCost), lineTotal: Number(it.qty) * Number(it.unitCost) })),
       total, paymentType: payload.paymentType, linkedTxId, linkedEntryId, linkedCashEntryId, notes: payload.notes || "", returns: [], createdAt: new Date().toISOString(),
     };
@@ -1293,9 +1379,17 @@ function App() {
     const invoiceEntryIds = new Set(data.purchaseInvoices.filter(i => i.supplierId === id).flatMap(i => [i.linkedEntryId, ...(i.returns || []).map(r => r.linkedEntryId)]));
     const adjustments = (supplier?.entries || []).filter(e => (e.type === "debt" || e.type === "return") && !invoiceEntryIds.has(e.id)).map(e => ({
       id: `archived-${e.id}`, type: "expense", title: `${e.type === "return" ? "مرتجع" : "دين"} مندوب: ${supplier.name}`,
-      category: "مشتريات", amount: Number(e.amount || 0) * (e.type === "return" ? -1 : 1), date: e.date, notes: e.notes || "", nonCash: true,
+      category: "مشتريات", businessCategory: supplierCategory(supplier).id, amount: Number(e.amount || 0) * (e.type === "return" ? -1 : 1), date: e.date, notes: e.notes || "", nonCash: true,
     }));
-    persist({ ...data, suppliers: data.suppliers.filter(s => s.id !== id), archivedSupplierAdjustments: [...(data.archivedSupplierAdjustments || []), ...adjustments] });
+    const category = supplierCategory(supplier).id;
+    const transactionIds = new Set((supplier?.entries || []).map(entry => entry.linkedTxId).filter(Boolean));
+    const transactions = data.transactions.map(tx =>
+      transactionIds.has(tx.id) && !tx.businessCategory ? { ...tx, businessCategory: category } : tx
+    );
+    const purchaseInvoices = data.purchaseInvoices.map(invoice =>
+      invoice.supplierId === id && !invoice.businessCategory ? { ...invoice, businessCategory: category } : invoice
+    );
+    persist({ ...data, transactions, purchaseInvoices, suppliers: data.suppliers.filter(s => s.id !== id), archivedSupplierAdjustments: [...(data.archivedSupplierAdjustments || []), ...adjustments] });
     showToast("تم حذف المندوب وبقيت حركاته المالية محفوظة");
   }
 
@@ -1494,7 +1588,8 @@ function App() {
       <BottomNav tab={tab} setTab={setTab} />
 
       {addOpen && (
-        <TxModal type={addType} setType={setAddType} categories={data.categories} initial={editItem} currency={data.settings.currency} partners={data.partners}
+        <TxModal type={addType} setType={setAddType} categories={data.categories} initial={editItem} linkedCategory={editItem ? supplierMovementCategories(data).transactions.get(editItem.id) : undefined}
+          currency={data.settings.currency} partners={data.partners}
           onClose={() => { setAddOpen(false); setEditItem(null); }} onSave={upsertTransaction} />
       )}
       {confirmDelete && (
@@ -1633,7 +1728,7 @@ function LedgerLogModal({ title: modalTitle, log, currency, total, categories, s
             {purpose === "supplier" && (
               <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
                 <option value="">اختر مندوب</option>
-                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                <SupplierOptions suppliers={suppliers} />
               </select>
             )}
             {purpose === "employee" && (
@@ -1770,7 +1865,7 @@ function SafeLogModal({ log, currency, total, cashTotal, networkTotal, categorie
           {purpose === "supplier" && (
             <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none mb-2">
               <option value="">اختر مندوب</option>
-              {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              <SupplierOptions suppliers={suppliers} />
             </select>
           )}
           {purpose === "employee" && (
@@ -1840,6 +1935,56 @@ function expenseSourceLabel(data,t) {
   return "غير مربوط بخصم من الأرصدة";
 }
 
+function BusinessBreakdown({ data, currentMonth }) {
+  const [month, setMonth] = useState(currentMonth);
+  const period = month || currentMonth;
+  const groups = monthlyBusinessBreakdown(data, period);
+  const money = amount => `${amount < 0 ? "−" : ""}${fmt(Math.abs(amount))} ${data.settings.currency}`;
+
+  return (
+    <section aria-label="الدخل والمصاريف حسب القسم" className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-bold">الدخل والمصاريف حسب القسم</h2>
+        <input type="month" aria-label="شهر التقرير" value={month} onChange={event => setMonth(event.target.value)}
+          className="bg-slate-50 rounded-lg px-2 py-1.5 text-xs text-slate-700" />
+      </div>
+      {groups.map(group => (
+        <div key={group.id} className="rounded-xl border border-slate-100 bg-slate-50">
+          <h3 className="px-3 py-3 text-sm font-semibold">{group.label}</h3>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 px-3 pb-3 text-xs">
+            <div><dt className="text-slate-500">الدخل</dt><dd className="num font-semibold text-emerald-700">{money(group.income)}</dd></div>
+            <div><dt className="text-slate-500">المصاريف</dt><dd className="num font-semibold text-red-700">{money(group.expense)}</dd></div>
+            <div><dt className="text-slate-500">الصافي</dt><dd className="num font-semibold">{money(group.income - group.expense)}</dd></div>
+            <div><dt className="text-slate-500">المدفوع المسجل</dt><dd className="num font-semibold">{money(group.paid)}</dd></div>
+          </dl>
+          <details className="mx-3 border-t border-slate-200 pb-2">
+            <summary className="cursor-pointer py-2 text-xs font-medium text-slate-600">عرض العمليات</summary>
+            {group.movements.length === 0 ? (
+              <div className="py-2 text-xs text-slate-400">لا توجد عمليات في هذا الشهر</div>
+            ) : (
+              <ul className="max-h-60 overflow-y-auto divide-y divide-slate-200">
+                {group.movements.sort((a, b) => b.date.localeCompare(a.date)).map(tx => (
+                  <li key={tx.id} className="py-2">
+                    <div className="flex justify-between gap-2 text-xs font-medium">
+                      <span>{tx.title || tx.category || "عملية"}</span>
+                      <span className="num whitespace-nowrap">{money(tx.amount)}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      {tx.date} · {tx.settlement ? "تسديد مورد" : tx.type === "income" ? "دخل" : tx.amount < 0 ? "مرتجع" : tx.nonCash ? "مصروف آجل" : "مصروف"}
+                    </div>
+                    {tx.notes && <div className="mt-1 text-[11px] text-slate-500">{tx.notes}</div>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        </div>
+      ))}
+      <p className="text-[11px] text-slate-500">المصاريف تشمل المشتريات الآجلة بتاريخها. المدفوع المسجل يشمل المصروفات المباشرة وتسديد الموردين بتاريخ الدفع.</p>
+    </section>
+  );
+}
+
 function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickDaily }) {
   const mt = monthTotals(curMonth);
   const [showExpenses, setShowExpenses] = useState(false);
@@ -1869,6 +2014,7 @@ function Dashboard({ data, totals, curMonth, monthTotals, onOpenTx, onOpenQuickD
         <StatCard icon="↗" color="#b8860b" label="سحوبات الشهر" value={mt.withdraw} currency={data.settings.currency} />
         <StatCard icon="🏦" color="#3B82F6" label="صافي ربح الشهر" value={mt.net} currency={data.settings.currency} />
       </div>
+      <BusinessBreakdown data={data} currentMonth={curMonth} />
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between">
         <div>
           <div className="text-xs text-slate-400 mb-1">الأرباح المتجمعة منذ البداية</div>
@@ -1976,6 +2122,8 @@ function QuickDailyModal({ data, onClose, onSave }) {
                 </select>
                 {sales.length > 1 && <button onClick={() => removeSaleRow(idx)} className="text-red-400 px-1">✕</button>}
               </div>
+              <BusinessCategorySelect value={s.businessCategory || ""} onChange={value => updateSale(idx, { businessCategory: value })}
+                fallback={transactionCategory(s.category)} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none" />
               <input value={s.notes} onChange={e => updateSale(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
             </div>
           ))}
@@ -1996,6 +2144,8 @@ function QuickDailyModal({ data, onClose, onSave }) {
                 </select>
                 {expenses.length > 1 && <button onClick={() => removeExpenseRow(idx)} className="text-red-400 px-1">✕</button>}
               </div>
+              <BusinessCategorySelect value={exp.businessCategory || ""} onChange={value => updateExpense(idx, { businessCategory: value })}
+                fallback={transactionCategory(exp.category)} className="w-full bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none" />
               <input value={exp.notes} onChange={e => updateExpense(idx, { notes: e.target.value })} placeholder="ملاحظات (اختياري)" className="w-full bg-slate-50 rounded-lg py-1.5 px-2 text-xs outline-none" />
             </div>
           ))}
@@ -2012,7 +2162,7 @@ function QuickDailyModal({ data, onClose, onSave }) {
                 <div className="flex items-center gap-1.5">
                   <select value={sp.supplierId} onChange={e => updateSupplier(idx, { supplierId: e.target.value })} className="flex-[1.3] bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none">
                     <option value="">اختر مندوب</option>
-                    {data.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    <SupplierOptions suppliers={data.suppliers} />
                   </select>
                   <input type="number" value={sp.amount} onChange={e => updateSupplier(idx, { amount: e.target.value })} placeholder={`المبلغ`} className="flex-1 bg-slate-50 rounded-lg py-2 px-2 text-xs outline-none num" />
                   {supplierPayments.length > 1 && <button onClick={() => removeSupplierRow(idx)} className="text-red-400 px-1">✕</button>}
@@ -2673,6 +2823,11 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
   const [expanded, setExpanded] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
 
+  const [category, setCategory] = useState(() =>
+    BUSINESS_CATEGORIES.find(({ id }) => data.suppliers.some(s => supplierCategory(s).id === id))?.id || BUSINESS_CATEGORIES[0].id
+  );
+  const visibleSuppliers = data.suppliers.filter(s => supplierCategory(s).id === category);
+
   const totalDebt = data.suppliers.reduce((sum, s) => {
     const bal = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
     return sum + Math.max(0, bal);
@@ -2682,7 +2837,7 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="font-bold text-lg">المناديب والموردين</div>
-        <button onClick={() => setForm({ name: "", phone: "", notes: "" })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة مندوب</button>
+        <button onClick={() => setForm({ name: "", phone: "", notes: "", category })} className="flex items-center gap-1 text-xs bg-slate-800 text-white rounded-full px-3 py-1.5">＋ إضافة مندوب</button>
       </div>
 
       {data.suppliers.length > 0 && (
@@ -2695,11 +2850,20 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
         </div>
       )}
 
-      {data.suppliers.length === 0 ? (
-        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد مناديب مضافون بعد</div>
+      <div role="group" aria-label="تصنيف المناديب والموردين" className="grid grid-cols-3 gap-2">
+        {BUSINESS_CATEGORIES.map(({ id, label }) => (
+          <button key={id} type="button" aria-pressed={category === id} onClick={() => setCategory(id)}
+            className={`rounded-xl px-2 py-2.5 text-xs font-semibold ${category === id ? "bg-slate-800 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {visibleSuppliers.length === 0 ? (
+        <div className="bg-white rounded-2xl p-6 text-center text-slate-400 text-sm border border-slate-100">لا يوجد مناديب أو موردون في هذا التصنيف</div>
       ) : (
         <div className="space-y-3">
-          {data.suppliers.map(s => {
+          {visibleSuppliers.map(s => {
             const balance = s.entries.reduce((b, e) => b + (e.type === "debt" ? e.amount : -e.amount), 0);
             const open = expanded === s.id;
             return (
@@ -2747,7 +2911,11 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
         </div>
       )}
 
-      {form && <SupplierModal initial={form} onClose={() => setForm(null)} onSave={(p) => { onSave(p); setForm(null); }} />}
+      {form && <SupplierModal initial={form} onClose={() => setForm(null)} onSave={supplier => {
+        onSave(supplier);
+        setCategory(supplier.category);
+        setForm(null);
+      }} />}
       {entryFor && (
         <SupplierEntryModal supplier={entryFor.supplier} type={entryFor.type} currency={data.settings.currency}
           onClose={() => setEntryFor(null)} onSave={(entry) => { onAddEntry(entryFor.supplier.id, entry); setEntryFor(null); }} />
@@ -2762,16 +2930,23 @@ function Suppliers({ data, onSave, onDelete, onAddEntry, onDeleteEntry }) {
 
 function SupplierModal({ initial, onClose, onSave }) {
   const [name, setName] = useState(initial.name || "");
+  const [category, setCategory] = useState(supplierCategory(initial).id);
   const [phone, setPhone] = useState(initial.phone || "");
   const [notes, setNotes] = useState(initial.notes || "");
   const [err, setErr] = useState("");
   function save() {
     if (!name.trim()) return setErr("اسم المندوب مطلوب");
-    onSave({ id: initial.id, name: name.trim(), phone: phone.trim(), notes: notes.trim() });
+    onSave({ id: initial.id, name: name.trim(), phone: phone.trim(), notes: notes.trim(), category });
   }
   return (
     <Sheet onClose={onClose} title={initial.id ? "تعديل مندوب" : "إضافة مندوب"}>
       <Field label="اسم المندوب / المحل"><input value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
+      <Field label="التصنيف">
+        <select aria-label="التصنيف" value={category} onChange={e => setCategory(e.target.value)}
+          className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none">
+          {BUSINESS_CATEGORIES.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      </Field>
       <Field label="رقم الجوال (اختياري)"><input value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       <Field label="ملاحظات"><textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none resize-none" /></Field>
       {err && <div className="text-red-500 text-xs mb-2">{err}</div>}
@@ -3174,6 +3349,8 @@ function ReturnModal({ invoice, currency, onClose, onSave }) {
 function InvoiceModal({ data, onClose, onSave }) {
   const [supplierId, setSupplierId] = useState("");
   const [supplierName, setSupplierName] = useState("");
+  const [activity, setActivity] = useState("");
+  const supplier = data.suppliers.find(s => s.id === supplierId);
   const [date, setDate] = useState(todayISO());
   const [paymentType, setPaymentType] = useState("cash");
   const [notes, setNotes] = useState("");
@@ -3191,8 +3368,7 @@ function InvoiceModal({ data, onClose, onSave }) {
     if (validItems.length === 0) return setErr("أضف صنف واحد على الأقل بكمية أكبر من صفر");
     if (!date) return setErr("التاريخ مطلوب");
     if (paymentType === "credit" && !supplierId) return setErr("اختر المورد عشان يتسجل الدين عليه");
-    const supplier = data.suppliers.find(s => s.id === supplierId);
-    onSave({ supplierId: supplierId || null, supplierName: supplier ? supplier.name : supplierName.trim(), date, paymentType, notes: notes.trim(), items: validItems });
+    onSave({ supplierId: supplierId || null, supplierName: supplier ? supplier.name : supplierName.trim(), businessCategory: activity, date, paymentType, notes: notes.trim(), items: validItems });
   }
 
   return (
@@ -3200,12 +3376,16 @@ function InvoiceModal({ data, onClose, onSave }) {
       <Field label="المورد (اختياري)">
         <select value={supplierId} onChange={e => { setSupplierId(e.target.value); setSupplierName(""); }} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none">
           <option value="">بدون مورد محدد</option>
-          {data.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          <SupplierOptions suppliers={data.suppliers} />
         </select>
       </Field>
       {!supplierId && (
         <Field label="اسم المورد (نص حر، اختياري)"><input value={supplierName} onChange={e => setSupplierName(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
       )}
+      <Field label="قسم الفاتورة">
+        <BusinessCategorySelect value={activity} onChange={setActivity} fallback={supplierCategory(supplier).id}
+          className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
+      </Field>
       <Field label="تاريخ الفاتورة"><input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" /></Field>
 
       <div className="text-xs text-slate-400 mb-1.5">الأصناف</div>
@@ -3778,12 +3958,13 @@ function SettingsPage({ data, onUpdateSettings, onAddCategory, onRemoveCategory,
   );
 }
 
-function TxModal({ type, setType, categories, initial, currency, partners, onClose, onSave }) {
+function TxModal({ type, setType, categories, initial, linkedCategory, currency, partners, onClose, onSave }) {
   const isEdit = !!initial;
   const [title, setTitle] = useState(initial?.title || "");
   const [person, setPerson] = useState(initial?.person || "");
   const [partnerId, setPartnerId] = useState(initial?.partnerId || "");
   const [category, setCategory] = useState(initial?.category || "");
+  const [activity, setActivity] = useState(initial?.businessCategory || "");
   const [amount, setAmount] = useState(initial?.amount ?? "");
   const [date, setDate] = useState(initial?.date || todayISO());
   const [notes, setNotes] = useState(initial?.notes || "");
@@ -3806,7 +3987,7 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
       onSave({ id: initial?.id, type, person: person.trim(), partnerId: partnerId || null, amount: amt, date, notes: reason.trim() });
     } else {
       if (!title.trim()) return setErr("اسم العملية مطلوب");
-      onSave({ id: initial?.id, type, title: title.trim(), category, amount: amt, date, notes: notes.trim(), paymentSource: type === "expense" ? paymentSource : "none" });
+      onSave({ id: initial?.id, type, title: title.trim(), category, businessCategory: activity || undefined, amount: amt, date, notes: notes.trim(), paymentSource: type === "expense" ? paymentSource : "none" });
     }
   }
 
@@ -3845,6 +4026,11 @@ function TxModal({ type, setType, categories, initial, currency, partners, onClo
               <option value="">بدون تصنيف</option>
               {cats.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+          </Field>
+          <Field label="قسم العملية">
+            <BusinessCategorySelect value={activity} onChange={setActivity}
+              fallback={linkedCategory || transactionCategory(category)}
+              className="w-full bg-slate-50 rounded-xl py-2.5 px-3 text-sm outline-none" />
           </Field>
         </>
       )}
